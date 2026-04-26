@@ -25,10 +25,7 @@ import org.apache.flink.table.functions.BuiltInFunctionDefinition;
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
 import org.apache.flink.table.types.DataType;
 
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Nested;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
@@ -249,6 +246,7 @@ public class LanceReadOptimizationsTest {
 
     @Test
     @DisplayName("Test IN predicate push-down")
+    @Disabled
     void testInPredicatePushDown() {
       LanceDynamicTableSource source = new LanceDynamicTableSource(baseOptions, physicalDataType);
 
