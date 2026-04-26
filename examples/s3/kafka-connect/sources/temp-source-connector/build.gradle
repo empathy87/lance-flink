@@ -1,0 +1,24 @@
+plugins {
+    id 'java'
+}
+
+group = 'dev.miron.connect'
+version = '1.0.0'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+dependencies {
+    compileOnly 'org.apache.kafka:connect-api:4.1.0'
+}
+
+tasks.named('jar') {
+    archiveFileName = "temp-source-connector-${project.version}.jar"
+}

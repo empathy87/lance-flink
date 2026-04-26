@@ -1,0 +1,7 @@
+{
+  "connector.class": "dev.miron.connect.temp.TempSourceConnector",
+  "tasks.max": "1",
+  "topic": "earth-temp",
+  "sensors": "5",
+  "messages.per.sensor.per.second": "1"
+}
