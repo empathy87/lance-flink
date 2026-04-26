@@ -15,18 +15,54 @@
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-        <maven.compiler.source>1.8</maven.compiler.source>
-        <maven.compiler.target>1.8</maven.compiler.target>
-        
-        <!-- 版本管理 -->
-        <flink.version>1.16.1</flink.version>
-        <lance.version>5.0.0-beta.6</lance.version>
-        <arrow.version>15.0.2</arrow.version>
+
+        <java11.release>11</java11.release>
+        <java17.release>17</java17.release>
+        <java.release>${java17.release}</java.release>
+        <maven.compiler.release>${java.release}</maven.compiler.release>
+
+        <flink.version>1.19.1</flink.version>
+
+        <lance.version>6.0.0-beta.2</lance.version>
+        <lance-namespace-impl.version>0.1.3</lance-namespace-impl.version>
+
+        <arrow14.version>14.0.2</arrow14.version>
+        <arrow15.version>15.0.2</arrow15.version>
+        <arrow18.version>18.1.0</arrow18.version>
+        <arrow183.version>18.3.0</arrow183.version>
+        <arrow.version>${arrow15.version}</arrow.version>
+
         <junit.version>5.10.1</junit.version>
         <slf4j.version>1.7.36</slf4j.version>
         <log4j.version>2.20.0</log4j.version>
         <mockito.version>5.3.1</mockito.version>
         <assertj.version>3.24.2</assertj.version>
+
+        <maven-compiler-plugin.version>3.8.1</maven-compiler-plugin.version>
+        <maven-surefire-plugin.version>3.2.5</maven-surefire-plugin.version>
+
+        <argLine/>
+
+        <extraJavaTestArgs>
+            -XX:+IgnoreUnrecognizedVMOptions
+            --add-opens=java.base/java.lang=ALL-UNNAMED
+            --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+            --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+            --add-opens=java.base/java.io=ALL-UNNAMED
+            --add-opens=java.base/java.net=ALL-UNNAMED
+            --add-opens=java.base/java.nio=ALL-UNNAMED
+            --add-opens=java.base/java.util=ALL-UNNAMED
+            --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+            --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED
+            --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED
+            --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+            --add-opens=java.base/sun.nio.cs=ALL-UNNAMED
+            --add-opens=java.base/sun.security.action=ALL-UNNAMED
+            --add-opens=java.base/sun.util.calendar=ALL-UNNAMED
+            --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED
+            -Djdk.reflect.useDirectMethodHandle=false
+            -Dio.netty.tryReflectionSetAccessible=true
+        </extraJavaTestArgs>
     </properties>
 
     <dependencies>
@@ -221,26 +257,25 @@
 
     <build>
         <plugins>
-            <!-- Maven 编译插件 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.11.0</version>
+                <version>${maven-compiler-plugin.version}</version>
                 <configuration>
-                    <source>${maven.compiler.source}</source>
-                    <target>${maven.compiler.target}</target>
+                    <release>${maven.compiler.release}</release>
                     <compilerArgs>
                         <arg>-Xlint:all</arg>
                     </compilerArgs>
                 </configuration>
             </plugin>
 
-            <!-- Maven Surefire 测试插件 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.1.2</version>
+                <version>${maven-surefire-plugin.version}</version>
                 <configuration>
+                    <argLine>@{argLine} ${extraJavaTestArgs}</argLine>
+                    <useSystemClassLoader>false</useSystemClassLoader>
                 </configuration>
             </plugin>
 
