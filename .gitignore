@@ -1,6 +1,7 @@
 # Maven
 target/
 .m2-cache/
+dependency-reduced-pom.xml
 
 # Build outputs
 build/

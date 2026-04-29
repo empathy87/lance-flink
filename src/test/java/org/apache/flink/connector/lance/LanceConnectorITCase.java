@@ -19,7 +19,6 @@ import org.apache.flink.connector.lance.config.LanceOptions.MetricType;
 import org.apache.flink.connector.lance.config.LanceOptions.WriteMode;
 import org.apache.flink.connector.lance.converter.LanceTypeConverter;
 import org.apache.flink.connector.lance.converter.RowDataConverter;
-import org.apache.flink.connector.lance.table.LanceCatalog;
 import org.apache.flink.connector.lance.table.LanceDynamicTableFactory;
 import org.apache.flink.connector.lance.table.LanceDynamicTableSink;
 import org.apache.flink.connector.lance.table.LanceDynamicTableSource;
@@ -245,35 +244,6 @@ class LanceConnectorITCase {
     // Create Factory
     LanceDynamicTableFactory factory = new LanceDynamicTableFactory();
     assertThat(factory.factoryIdentifier()).isEqualTo("lance");
-  }
-
-  @Test
-  @DisplayName("Test Catalog lifecycle")
-  void testCatalogLifecycle() throws Exception {
-    LanceCatalog catalog = new LanceCatalog("test_catalog", "default", warehousePath);
-
-    // Open Catalog
-    catalog.open();
-    assertThat(catalog.getDefaultDatabase()).isEqualTo("default");
-    assertThat(catalog.getWarehouse()).isEqualTo(warehousePath);
-
-    // Verify default database exists
-    assertThat(catalog.databaseExists("default")).isTrue();
-
-    // Create test database
-    catalog.createDatabase("test_db", null, true);
-    assertThat(catalog.databaseExists("test_db")).isTrue();
-    assertThat(catalog.listDatabases()).contains("default", "test_db");
-
-    // List empty tables
-    assertThat(catalog.listTables("test_db")).isEmpty();
-
-    // Drop test database
-    catalog.dropDatabase("test_db", true, true);
-    assertThat(catalog.databaseExists("test_db")).isFalse();
-
-    // Close Catalog
-    catalog.close();
   }
 
   @Test

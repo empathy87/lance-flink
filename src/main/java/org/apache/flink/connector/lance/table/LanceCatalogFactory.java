@@ -13,11 +13,13 @@
  */
 package org.apache.flink.connector.lance.table;
 
+import org.lance.namespace.DirectoryNamespace;
+
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
+import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.Catalog;
 import org.apache.flink.table.factories.CatalogFactory;
-import org.apache.flink.table.factories.FactoryUtil;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -25,31 +27,12 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Lance Catalog factory.
- *
- * <p>Used to create LanceCatalog via SQL DDL.
- *
- * <p>Usage example (local path):
+ * Factory for {@link LanceNamespaceCatalog}.
  *
  * <pre>{@code
- * CREATE CATALOG lance_catalog WITH (
+ * CREATE CATALOG my_catalog WITH (
  *     'type' = 'lance',
- *     'warehouse' = '/path/to/warehouse',
- *     'default-database' = 'default'
- * );
- * }</pre>
- *
- * <p>Usage example (S3 path):
- *
- * <pre>{@code
- * CREATE CATALOG lance_s3_catalog WITH (
- *     'type' = 'lance',
- *     'warehouse' = 's3://bucket-name/warehouse',
- *     'default-database' = 'default',
- *     's3-access-key' = 'your-access-key',
- *     's3-secret-key' = 'your-secret-key',
- *     's3-region' = 'us-east-1',
- *     's3-endpoint' = 'https://s3.amazonaws.com'
+ *     'warehouse' = 'file:/tmp/lance'
  * );
  * }</pre>
  */
@@ -57,56 +40,25 @@ public class LanceCatalogFactory implements CatalogFactory {
 
   public static final String IDENTIFIER = "lance";
 
+  private static final String WAREHOUSE_KEY = "warehouse";
+  private static final String DEFAULT_DATABASE_KEY = "default-database";
+  private static final String NAMESPACE_ROOT_KEY = "root";
+
+  private static final Set<String> SUPPORTED_OPTIONS =
+      Set.of("type", "property-version", WAREHOUSE_KEY, DEFAULT_DATABASE_KEY);
+
   public static final ConfigOption<String> WAREHOUSE =
-      ConfigOptions.key("warehouse")
+      ConfigOptions.key(WAREHOUSE_KEY)
           .stringType()
           .noDefaultValue()
           .withDescription(
-              "Lance data warehouse path, supports local path or S3 path (e.g., s3://bucket/path)");
+              "Lance warehouse location for the directory namespace, for example 'file:/tmp/lance'.");
 
   public static final ConfigOption<String> DEFAULT_DATABASE =
-      ConfigOptions.key("default-database")
+      ConfigOptions.key(DEFAULT_DATABASE_KEY)
           .stringType()
-          .defaultValue(LanceCatalog.DEFAULT_DATABASE)
-          .withDescription("Default database name");
-
-  // ==================== S3 Configuration Options ====================
-
-  public static final ConfigOption<String> S3_ACCESS_KEY =
-      ConfigOptions.key("s3-access-key")
-          .stringType()
-          .noDefaultValue()
-          .withDescription("S3 Access Key ID");
-
-  public static final ConfigOption<String> S3_SECRET_KEY =
-      ConfigOptions.key("s3-secret-key")
-          .stringType()
-          .noDefaultValue()
-          .withDescription("S3 Secret Access Key");
-
-  public static final ConfigOption<String> S3_REGION =
-      ConfigOptions.key("s3-region")
-          .stringType()
-          .noDefaultValue()
-          .withDescription("S3 Region (e.g., us-east-1)");
-
-  public static final ConfigOption<String> S3_ENDPOINT =
-      ConfigOptions.key("s3-endpoint")
-          .stringType()
-          .noDefaultValue()
-          .withDescription("S3 Endpoint URL (for S3-compatible object storage like MinIO)");
-
-  public static final ConfigOption<Boolean> S3_VIRTUAL_HOSTED_STYLE =
-      ConfigOptions.key("s3-virtual-hosted-style")
-          .booleanType()
-          .defaultValue(true)
-          .withDescription("Whether to use virtual hosted style URL (default true)");
-
-  public static final ConfigOption<Boolean> S3_ALLOW_HTTP =
-      ConfigOptions.key("s3-allow-http")
-          .booleanType()
-          .defaultValue(false)
-          .withDescription("Whether to allow HTTP connections (default false, HTTPS only)");
+          .defaultValue(LanceNamespaceCatalog.DEFAULT_DATABASE)
+          .withDescription("Default database name for the Lance catalog.");
 
   @Override
   public String factoryIdentifier() {
@@ -124,55 +76,41 @@ public class LanceCatalogFactory implements CatalogFactory {
   public Set<ConfigOption<?>> optionalOptions() {
     Set<ConfigOption<?>> options = new HashSet<>();
     options.add(DEFAULT_DATABASE);
-    // S3 related options
-    options.add(S3_ACCESS_KEY);
-    options.add(S3_SECRET_KEY);
-    options.add(S3_REGION);
-    options.add(S3_ENDPOINT);
-    options.add(S3_VIRTUAL_HOSTED_STYLE);
-    options.add(S3_ALLOW_HTTP);
     return options;
   }
 
   @Override
   public Catalog createCatalog(Context context) {
-    FactoryUtil.CatalogFactoryHelper helper = FactoryUtil.createCatalogFactoryHelper(this, context);
-    helper.validate();
+    Map<String, String> rawOptions = context.getOptions();
 
-    String catalogName = context.getName();
-    String warehouse = helper.getOptions().get(WAREHOUSE);
-    String defaultDatabase = helper.getOptions().get(DEFAULT_DATABASE);
-
-    // Collect storage configuration
-    Map<String, String> storageOptions = new HashMap<>();
-
-    // S3 configuration
-    String accessKey = helper.getOptions().get(S3_ACCESS_KEY);
-    String secretKey = helper.getOptions().get(S3_SECRET_KEY);
-    String region = helper.getOptions().get(S3_REGION);
-    String endpoint = helper.getOptions().get(S3_ENDPOINT);
-    Boolean virtualHostedStyle = helper.getOptions().get(S3_VIRTUAL_HOSTED_STYLE);
-    Boolean allowHttp = helper.getOptions().get(S3_ALLOW_HTTP);
-
-    if (accessKey != null) {
-      storageOptions.put("aws_access_key_id", accessKey);
-    }
-    if (secretKey != null) {
-      storageOptions.put("aws_secret_access_key", secretKey);
-    }
-    if (region != null) {
-      storageOptions.put("aws_region", region);
-    }
-    if (endpoint != null) {
-      storageOptions.put("aws_endpoint", endpoint);
-    }
-    if (virtualHostedStyle != null) {
-      storageOptions.put("aws_virtual_hosted_style_request", virtualHostedStyle.toString());
-    }
-    if (allowHttp != null) {
-      storageOptions.put("allow_http", allowHttp.toString());
+    for (String option : rawOptions.keySet()) {
+      if (!SUPPORTED_OPTIONS.contains(option)) {
+        throw new ValidationException(
+            String.format(
+                "Unsupported option '%s' for Lance catalog. "
+                    + "Supported Lance catalog options are: '%s', '%s'.",
+                option, WAREHOUSE_KEY, DEFAULT_DATABASE_KEY));
+      }
     }
 
-    return new LanceCatalog(catalogName, defaultDatabase, warehouse, storageOptions);
+    String warehouse = rawOptions.get(WAREHOUSE_KEY);
+    if (warehouse == null || warehouse.isBlank()) {
+      throw new ValidationException(
+          "Option '" + WAREHOUSE_KEY + "' must not be blank for Lance catalog.");
+    }
+
+    String defaultDatabase =
+        rawOptions.getOrDefault(DEFAULT_DATABASE_KEY, LanceNamespaceCatalog.DEFAULT_DATABASE);
+    if (defaultDatabase.isBlank()) {
+      throw new ValidationException(
+          "Option '" + DEFAULT_DATABASE_KEY + "' must not be blank for Lance catalog.");
+    }
+
+    Map<String, String> options = new HashMap<>();
+    options.put(NAMESPACE_ROOT_KEY, warehouse);
+
+    DirectoryNamespace namespace = new DirectoryNamespace();
+
+    return new LanceNamespaceCatalog(context.getName(), defaultDatabase, namespace, options);
   }
 }
