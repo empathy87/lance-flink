@@ -16,9 +16,9 @@ package org.apache.flink.connector.lance;
 import org.apache.flink.connector.lance.config.LanceOptions;
 import org.apache.flink.connector.lance.config.LanceOptions.IndexType;
 import org.apache.flink.connector.lance.config.LanceOptions.MetricType;
-import org.apache.flink.connector.lance.config.LanceOptions.WriteMode;
 import org.apache.flink.connector.lance.converter.LanceTypeConverter;
 import org.apache.flink.connector.lance.converter.RowDataConverter;
+import org.apache.flink.connector.lance.sink.LanceSinkV2;
 import org.apache.flink.connector.lance.table.LanceDynamicTableFactory;
 import org.apache.flink.connector.lance.table.LanceDynamicTableSink;
 import org.apache.flink.connector.lance.table.LanceDynamicTableSource;
@@ -89,7 +89,6 @@ class LanceConnectorITCase {
             .readFilter("id > 0")
             // Sink configuration
             .writeBatchSize(256)
-            .writeMode(WriteMode.APPEND)
             .writeMaxRowsPerFile(100000)
             // Index configuration
             .indexType(IndexType.IVF_PQ)
@@ -113,7 +112,6 @@ class LanceConnectorITCase {
     assertThat(options.getReadColumns()).containsExactly("id", "content", "embedding");
     assertThat(options.getReadFilter()).isEqualTo("id > 0");
     assertThat(options.getWriteBatchSize()).isEqualTo(256);
-    assertThat(options.getWriteMode()).isEqualTo(WriteMode.APPEND);
     assertThat(options.getWriteMaxRowsPerFile()).isEqualTo(100000);
     assertThat(options.getIndexType()).isEqualTo(IndexType.IVF_PQ);
     assertThat(options.getIndexColumn()).isEqualTo("embedding");
@@ -175,20 +173,19 @@ class LanceConnectorITCase {
   }
 
   @Test
-  @DisplayName("Test LanceSink builder pattern")
-  void testLanceSinkBuilder() {
-    LanceSink sink =
-        LanceSink.builder()
+  @DisplayName("Test LanceSinkV2 construction")
+  void testLanceSinkV2Construction() {
+    LanceOptions options =
+        LanceOptions.builder()
             .path(datasetPath)
-            .batchSize(128)
-            .writeMode(WriteMode.OVERWRITE)
-            .maxRowsPerFile(50000)
-            .rowType(rowType)
+            .writeBatchSize(128)
+            .writeMaxRowsPerFile(50000)
             .build();
+
+    LanceSinkV2 sink = new LanceSinkV2(options, rowType);
 
     assertThat(sink.getOptions().getPath()).isEqualTo(datasetPath);
     assertThat(sink.getOptions().getWriteBatchSize()).isEqualTo(128);
-    assertThat(sink.getOptions().getWriteMode()).isEqualTo(WriteMode.OVERWRITE);
     assertThat(sink.getOptions().getWriteMaxRowsPerFile()).isEqualTo(50000);
     assertThat(sink.getRowType()).isEqualTo(rowType);
   }
@@ -350,11 +347,6 @@ class LanceConnectorITCase {
   @Test
   @DisplayName("Test all enum types")
   void testAllEnumTypes() {
-    // WriteMode
-    assertThat(WriteMode.values()).hasSize(2);
-    assertThat(WriteMode.APPEND.getValue()).isEqualTo("append");
-    assertThat(WriteMode.OVERWRITE.getValue()).isEqualTo("overwrite");
-
     // IndexType
     assertThat(IndexType.values()).hasSize(3);
     assertThat(IndexType.IVF_PQ.getValue()).isEqualTo("IVF_PQ");

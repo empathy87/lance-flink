@@ -23,8 +23,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -61,6 +60,64 @@ class LanceNamespaceCatalogITCase {
     List<Row> rows = collectRows(tableEnv.executeSql("SELECT * FROM word_count"));
 
     assertThat(rows).containsExactly(Row.of("a", 10L));
+  }
+
+  @Test
+  void testWordCountUpsertWithPrimaryKey() throws Exception {
+    EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
+    TableEnvironment tableEnv = TableEnvironment.create(settings);
+
+    String warehouseUri = tempDir.toUri().toString();
+
+    tableEnv.executeSql(
+        "CREATE CATALOG my_catalog WITH ("
+            + "'type' = 'lance', "
+            + "'warehouse' = "
+            + sqlString(warehouseUri)
+            + ")");
+
+    tableEnv.executeSql("USE CATALOG my_catalog");
+
+    // Paimon-style PK DDL — the constraint must reach the dynamic sink so the
+    // aggregation's retract stream can be normalized into upserts.
+    tableEnv.executeSql(
+        "CREATE TABLE word_count (word STRING PRIMARY KEY NOT ENFORCED, cnt BIGINT)");
+
+    // Source rows with duplicate words; GROUP BY produces an upsert stream.
+    tableEnv.executeSql(
+        "CREATE TEMPORARY VIEW word_source AS "
+            + "SELECT word FROM (VALUES ('hello'), ('world'), ('hello'), ('flink'), ('hello'), "
+            + "('world')) AS t(word)");
+
+    tableEnv
+        .executeSql("INSERT INTO word_count SELECT word, COUNT(*) FROM word_source GROUP BY word")
+        .await();
+
+    Map<String, Long> counts = new HashMap<>();
+    for (Row row : collectRows(tableEnv.executeSql("SELECT word, cnt FROM word_count"))) {
+      counts.put((String) row.getField(0), (Long) row.getField(1));
+    }
+    assertThat(counts).containsOnly(entry("hello", 3L), entry("world", 2L), entry("flink", 1L));
+
+    // Re-running the upsert with a different distribution must overwrite by key.
+    tableEnv.executeSql(
+        "CREATE TEMPORARY VIEW word_source2 AS "
+            + "SELECT word FROM (VALUES ('hello'), ('flink'), ('flink'), ('flink')) AS t(word)");
+    tableEnv
+        .executeSql("INSERT INTO word_count SELECT word, COUNT(*) FROM word_source2 GROUP BY word")
+        .await();
+
+    counts.clear();
+    for (Row row : collectRows(tableEnv.executeSql("SELECT word, cnt FROM word_count"))) {
+      counts.put((String) row.getField(0), (Long) row.getField(1));
+    }
+    // hello and flink were re-emitted with new counts, world was not in the second batch and
+    // therefore stays at its previous value.
+    assertThat(counts).containsOnly(entry("hello", 1L), entry("world", 2L), entry("flink", 3L));
+  }
+
+  private static Map.Entry<String, Long> entry(String key, Long value) {
+    return new AbstractMap.SimpleEntry<>(key, value);
   }
 
   private static List<Row> collectRows(TableResult result) throws Exception {

@@ -80,13 +80,6 @@ public class LanceOptions implements Serializable {
           .defaultValue(1024)
           .withDescription("Batch size for writing, default 1024");
 
-  /** Write mode: append or overwrite */
-  public static final ConfigOption<String> WRITE_MODE =
-      ConfigOptions.key("write.mode")
-          .stringType()
-          .defaultValue("append")
-          .withDescription("Write mode: append or overwrite, default append");
-
   /** Maximum rows per file */
   public static final ConfigOption<Integer> WRITE_MAX_ROWS_PER_FILE =
       ConfigOptions.key("write.max-rows-per-file")
@@ -205,34 +198,6 @@ public class LanceOptions implements Serializable {
           .noDefaultValue()
           .withDescription("Lance data warehouse path (required)");
 
-  // ==================== Write Mode Enum ====================
-
-  /** Write mode enum */
-  public enum WriteMode {
-    APPEND("append"),
-    OVERWRITE("overwrite");
-
-    private final String value;
-
-    WriteMode(String value) {
-      this.value = value;
-    }
-
-    public String getValue() {
-      return value;
-    }
-
-    public static WriteMode fromValue(String value) {
-      for (WriteMode mode : values()) {
-        if (mode.value.equalsIgnoreCase(value)) {
-          return mode;
-        }
-      }
-      throw new IllegalArgumentException(
-          "Unsupported write mode: " + value + ", supported modes: append, overwrite");
-    }
-  }
-
   // ==================== Index Type Enum ====================
 
   /** Index type enum */
@@ -299,7 +264,6 @@ public class LanceOptions implements Serializable {
   private final List<String> readColumns;
   private final String readFilter;
   private final int writeBatchSize;
-  private final WriteMode writeMode;
   private final int writeMaxRowsPerFile;
   private final IndexType indexType;
   private final String indexColumn;
@@ -324,7 +288,6 @@ public class LanceOptions implements Serializable {
     this.readColumns = builder.readColumns;
     this.readFilter = builder.readFilter;
     this.writeBatchSize = builder.writeBatchSize;
-    this.writeMode = builder.writeMode;
     this.writeMaxRowsPerFile = builder.writeMaxRowsPerFile;
     this.indexType = builder.indexType;
     this.indexColumn = builder.indexColumn;
@@ -367,10 +330,6 @@ public class LanceOptions implements Serializable {
 
   public int getWriteBatchSize() {
     return writeBatchSize;
-  }
-
-  public WriteMode getWriteMode() {
-    return writeMode;
   }
 
   public int getWriteMaxRowsPerFile() {
@@ -469,7 +428,6 @@ public class LanceOptions implements Serializable {
 
     // Sink configuration
     builder.writeBatchSize(config.get(WRITE_BATCH_SIZE));
-    builder.writeMode(WriteMode.fromValue(config.get(WRITE_MODE)));
     builder.writeMaxRowsPerFile(config.get(WRITE_MAX_ROWS_PER_FILE));
 
     // Index configuration
@@ -514,7 +472,6 @@ public class LanceOptions implements Serializable {
     private List<String> readColumns = Collections.emptyList();
     private String readFilter;
     private int writeBatchSize = 1024;
-    private WriteMode writeMode = WriteMode.APPEND;
     private int writeMaxRowsPerFile = 1000000;
     private IndexType indexType = IndexType.IVF_PQ;
     private String indexColumn;
@@ -559,11 +516,6 @@ public class LanceOptions implements Serializable {
 
     public Builder writeBatchSize(int writeBatchSize) {
       this.writeBatchSize = writeBatchSize;
-      return this;
-    }
-
-    public Builder writeMode(WriteMode writeMode) {
-      this.writeMode = writeMode;
       return this;
     }
 
@@ -751,7 +703,6 @@ public class LanceOptions implements Serializable {
         && Objects.equals(path, that.path)
         && Objects.equals(readColumns, that.readColumns)
         && Objects.equals(readFilter, that.readFilter)
-        && writeMode == that.writeMode
         && indexType == that.indexType
         && Objects.equals(indexColumn, that.indexColumn)
         && Objects.equals(indexNumSubVectors, that.indexNumSubVectors)
@@ -771,7 +722,6 @@ public class LanceOptions implements Serializable {
         readColumns,
         readFilter,
         writeBatchSize,
-        writeMode,
         writeMaxRowsPerFile,
         indexType,
         indexColumn,
@@ -807,8 +757,6 @@ public class LanceOptions implements Serializable {
         + '\''
         + ", writeBatchSize="
         + writeBatchSize
-        + ", writeMode="
-        + writeMode
         + ", writeMaxRowsPerFile="
         + writeMaxRowsPerFile
         + ", indexType="

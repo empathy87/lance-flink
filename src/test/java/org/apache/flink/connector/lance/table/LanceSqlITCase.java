@@ -80,7 +80,6 @@ class LanceSqlITCase {
             "read.columns",
             "read.filter",
             "write.batch-size",
-            "write.mode",
             "write.max-rows-per-file",
             "index.type",
             "index.column",
@@ -115,12 +114,7 @@ class LanceSqlITCase {
   @Test
   @DisplayName("Test LanceDynamicTableSink creation")
   void testDynamicTableSinkCreation() {
-    LanceOptions options =
-        LanceOptions.builder()
-            .path(datasetPath)
-            .writeBatchSize(256)
-            .writeMode(LanceOptions.WriteMode.APPEND)
-            .build();
+    LanceOptions options = LanceOptions.builder().path(datasetPath).writeBatchSize(256).build();
 
     DataType dataType =
         DataTypes.ROW(
@@ -197,8 +191,6 @@ class LanceSqlITCase {
     assertThat(LanceDynamicTableFactory.READ_BATCH_SIZE.key()).isEqualTo("read.batch-size");
     assertThat(LanceDynamicTableFactory.READ_BATCH_SIZE.defaultValue()).isEqualTo(1024);
     assertThat(LanceDynamicTableFactory.WRITE_BATCH_SIZE.key()).isEqualTo("write.batch-size");
-    assertThat(LanceDynamicTableFactory.WRITE_MODE.key()).isEqualTo("write.mode");
-    assertThat(LanceDynamicTableFactory.WRITE_MODE.defaultValue()).isEqualTo("append");
     assertThat(LanceDynamicTableFactory.INDEX_TYPE.key()).isEqualTo("index.type");
     assertThat(LanceDynamicTableFactory.INDEX_TYPE.defaultValue()).isEqualTo("IVF_PQ");
     assertThat(LanceDynamicTableFactory.VECTOR_METRIC.key()).isEqualTo("vector.metric");

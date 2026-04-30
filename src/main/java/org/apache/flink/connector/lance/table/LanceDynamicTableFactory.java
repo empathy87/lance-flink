@@ -18,34 +18,16 @@ import org.apache.flink.connector.lance.config.LanceOptions;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.connector.sink.DynamicTableSink;
 import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.factories.DynamicTableSinkFactory;
 import org.apache.flink.table.factories.DynamicTableSourceFactory;
 import org.apache.flink.table.factories.FactoryUtil;
 
-import java.util.HashSet;
-import java.util.Set;
+import java.util.*;
 
-/**
- * Lance dynamic table factory.
- *
- * <p>Implements Flink Table API DynamicTableSourceFactory and DynamicTableSinkFactory interfaces,
- * supports creating Lance tables via SQL DDL.
- *
- * <p>Usage example:
- *
- * <pre>{@code
- * CREATE TABLE lance_table (
- *     id BIGINT,
- *     content STRING,
- *     embedding ARRAY<FLOAT>
- * ) WITH (
- *     'connector' = 'lance',
- *     'path' = '/path/to/dataset'
- * );
- * }</pre>
- */
+/** Dynamic table source/sink factory for Lance. */
 public class LanceDynamicTableFactory
     implements DynamicTableSourceFactory, DynamicTableSinkFactory {
 
@@ -79,12 +61,6 @@ public class LanceDynamicTableFactory
           .intType()
           .defaultValue(1024)
           .withDescription("Write batch size");
-
-  public static final ConfigOption<String> WRITE_MODE =
-      ConfigOptions.key("write.mode")
-          .stringType()
-          .defaultValue("append")
-          .withDescription("Write mode: append or overwrite");
 
   public static final ConfigOption<Integer> WRITE_MAX_ROWS_PER_FILE =
       ConfigOptions.key("write.max-rows-per-file")
@@ -141,28 +117,24 @@ public class LanceDynamicTableFactory
 
   @Override
   public Set<ConfigOption<?>> requiredOptions() {
-    Set<ConfigOption<?>> options = new HashSet<>();
-    options.add(PATH);
-    return options;
+    return Set.of(PATH);
   }
 
   @Override
   public Set<ConfigOption<?>> optionalOptions() {
-    Set<ConfigOption<?>> options = new HashSet<>();
-    options.add(READ_BATCH_SIZE);
-    options.add(READ_COLUMNS);
-    options.add(READ_FILTER);
-    options.add(WRITE_BATCH_SIZE);
-    options.add(WRITE_MODE);
-    options.add(WRITE_MAX_ROWS_PER_FILE);
-    options.add(INDEX_TYPE);
-    options.add(INDEX_COLUMN);
-    options.add(INDEX_NUM_PARTITIONS);
-    options.add(INDEX_NUM_SUB_VECTORS);
-    options.add(VECTOR_COLUMN);
-    options.add(VECTOR_METRIC);
-    options.add(VECTOR_NPROBES);
-    return options;
+    return Set.of(
+        READ_BATCH_SIZE,
+        READ_COLUMNS,
+        READ_FILTER,
+        WRITE_BATCH_SIZE,
+        WRITE_MAX_ROWS_PER_FILE,
+        INDEX_TYPE,
+        INDEX_COLUMN,
+        INDEX_NUM_PARTITIONS,
+        INDEX_NUM_SUB_VECTORS,
+        VECTOR_COLUMN,
+        VECTOR_METRIC,
+        VECTOR_NPROBES);
   }
 
   @Override
@@ -184,12 +156,15 @@ public class LanceDynamicTableFactory
 
     ReadableConfig config = helper.getOptions();
     LanceOptions options = buildLanceOptions(config);
+    ResolvedSchema schema = context.getCatalogTable().getResolvedSchema();
 
-    return new LanceDynamicTableSink(
-        options, context.getCatalogTable().getResolvedSchema().toPhysicalRowDataType());
+    return new LanceDynamicTableSink(options, schema.toPhysicalRowDataType(), primaryKeys(schema));
   }
 
-  /** Build LanceOptions from configuration */
+  private static List<String> primaryKeys(ResolvedSchema schema) {
+    return schema.getPrimaryKey().map(pk -> List.copyOf(pk.getColumns())).orElse(List.of());
+  }
+
   private LanceOptions buildLanceOptions(ReadableConfig config) {
     LanceOptions.Builder builder = LanceOptions.builder();
 
@@ -203,14 +178,21 @@ public class LanceDynamicTableFactory
         .ifPresent(
             columns -> {
               if (!columns.isEmpty()) {
-                builder.readColumns(java.util.Arrays.asList(columns.split(",")));
+                List<String> readColumns =
+                    Arrays.stream(columns.split(","))
+                        .map(String::trim)
+                        .filter(column -> !column.isEmpty())
+                        .toList();
+
+                if (!readColumns.isEmpty()) {
+                  builder.readColumns(readColumns);
+                }
               }
             });
     config.getOptional(READ_FILTER).ifPresent(builder::readFilter);
 
     // Sink configuration
     builder.writeBatchSize(config.get(WRITE_BATCH_SIZE));
-    builder.writeMode(LanceOptions.WriteMode.fromValue(config.get(WRITE_MODE)));
     builder.writeMaxRowsPerFile(config.get(WRITE_MAX_ROWS_PER_FILE));
 
     // Index configuration

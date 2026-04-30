@@ -17,8 +17,7 @@ CREATE TABLE lance_vectors (
 ) WITH (
     'connector' = 'lance',
     'path' = '/tmp/lance/vectors',
-    'write.batch-size' = '1024',
-    'write.mode' = 'overwrite'
+    'write.batch-size' = '1024'
 );
 
 -- Insert test data
@@ -49,7 +48,6 @@ CREATE TABLE document_embeddings (
     'path' = '/tmp/lance/documents',
     -- Write configuration
     'write.batch-size' = '2048',
-    'write.mode' = 'append',
     'write.max-rows-per-file' = '100000',
     -- Vector index configuration (IVF_PQ)
     'index.type' = 'IVF_PQ',
@@ -212,8 +210,7 @@ CREATE TABLE lance_events (
 ) WITH (
     'connector' = 'lance',
     'path' = '/tmp/lance/events',
-    'write.batch-size' = '1000',
-    'write.mode' = 'append'
+    'write.batch-size' = '1000'
 );
 
 -- Streaming write
@@ -271,7 +268,6 @@ DROP CATALOG IF EXISTS lance_catalog;
 --
 -- Write configuration:
 --   write.batch-size    = 1024           -- Write batch size
---   write.mode          = 'append'       -- Write mode: append/overwrite
 --   write.max-rows-per-file = 1000000    -- Max rows per file
 --
 -- Index configuration:

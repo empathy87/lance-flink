@@ -68,13 +68,15 @@ import java.io.Closeable;
 import java.net.URI;
 import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static java.util.Collections.singletonList;
 import static org.apache.flink.connector.lance.converter.LanceTypeConverter.toArrowSchema;
@@ -87,6 +89,8 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
   public static final String DEFAULT_DATABASE = "default";
   private static final String CONNECTOR_OPTION = "connector";
   private static final String PATH_OPTION = "path";
+  static final String PRIMARY_KEY_METADATA = "flink.primary-keys";
+  private static final String PRIMARY_KEY_DELIMITER = ",";
 
   private final LanceNamespace namespace;
   private final BufferAllocator allocator;
@@ -172,7 +176,7 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
     }
   }
 
-  // ==================== Database Operations ====================
+  // Database Operations
 
   @Override
   public List<String> listDatabases() throws CatalogException {
@@ -267,7 +271,7 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
     throw new CatalogException("Lance namespace catalog does not support altering databases");
   }
 
-  // ==================== Table Operations ====================
+  // Table Operations
 
   @Override
   public List<String> listTables(String databaseName)
@@ -337,25 +341,45 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
     String datasetPath = normalizeDatasetPath(location);
 
     RowType rowType;
+    List<String> primaryKeys;
     try (Dataset dataset = Dataset.open().allocator(allocator).uri(datasetPath).build()) {
-      rowType = LanceTypeConverter.toFlinkRowType(dataset.getSchema());
+      org.apache.arrow.vector.types.pojo.Schema arrowSchema = dataset.getSchema();
+      rowType = LanceTypeConverter.toFlinkRowType(arrowSchema);
+      primaryKeys = readPrimaryKeysFromMetadata(arrowSchema.getCustomMetadata());
+      validatePrimaryKeysExist(rowType, primaryKeys);
     } catch (Exception e) {
       throw new CatalogException(
           "Failed to load Lance dataset for table: " + tablePath + " at location: " + datasetPath,
           e);
     }
 
-    Schema.Builder schemaBuilder = Schema.newBuilder();
-    for (RowType.RowField field : rowType.getFields()) {
-      DataType dataType = LanceTypeConverter.toDataType(field.getType());
-      schemaBuilder.column(field.getName(), dataType);
-    }
+    Schema schema = toFlinkSchema(primaryKeys, rowType);
 
+    return CatalogTable.of(schema, "", Collections.emptyList(), buildTableOptions(datasetPath));
+  }
+
+  private static Map<String, String> buildTableOptions(String datasetPath) {
     Map<String, String> options = new HashMap<>();
     options.put(CONNECTOR_OPTION, LanceDynamicTableFactory.IDENTIFIER);
     options.put(PATH_OPTION, datasetPath);
+    return options;
+  }
 
-    return CatalogTable.of(schemaBuilder.build(), "", Collections.emptyList(), options);
+  private static Schema toFlinkSchema(List<String> primaryKeys, RowType rowType) {
+    Set<String> pkSet = new HashSet<>(primaryKeys);
+    Schema.Builder schemaBuilder = Schema.newBuilder();
+    for (RowType.RowField field : rowType.getFields()) {
+      DataType dataType = LanceTypeConverter.toDataType(field.getType());
+      // Flink requires PK columns to be NOT NULL.
+      if (pkSet.contains(field.getName())) {
+        dataType = dataType.notNull();
+      }
+      schemaBuilder.column(field.getName(), dataType);
+    }
+    if (!primaryKeys.isEmpty()) {
+      schemaBuilder.primaryKey(primaryKeys);
+    }
+    return schemaBuilder.build();
   }
 
   @Override
@@ -368,11 +392,13 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
       return;
     }
 
-    RowType rowType = validateAndExtractRowType(table);
+    TableSchemaSpec spec = validateAndExtractSchemaSpec(table);
+    org.apache.arrow.vector.types.pojo.Schema arrowSchema =
+        attachPrimaryKeyMetadata(toArrowSchema(spec.rowType), spec.primaryKeys);
 
     byte[] ipcBytes;
     try {
-      ipcBytes = serializeEmptyStream(toArrowSchema(rowType));
+      ipcBytes = serializeEmptyStream(arrowSchema);
     } catch (Exception e) {
       throw new CatalogException("Failed to serialize schema as Arrow IPC stream", e);
     }
@@ -390,7 +416,7 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
     }
   }
 
-  private RowType validateAndExtractRowType(CatalogBaseTable table) {
+  private TableSchemaSpec validateAndExtractSchemaSpec(CatalogBaseTable table) {
     if (table.getOptions().containsKey(PATH_OPTION)) {
       throw new CatalogException(
           String.format(
@@ -419,11 +445,6 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
       throw new CatalogException("Lance namespace catalog does not support watermark definitions");
     }
 
-    if (resolved.getResolvedSchema().getPrimaryKey().isPresent()) {
-      throw new CatalogException(
-          "Lance namespace catalog does not support primary key constraints");
-    }
-
     if (resolved.getResolvedSchema().getColumns().stream()
         .anyMatch(column -> !column.isPhysical())) {
       throw new CatalogException(
@@ -435,7 +456,61 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
       throw new CatalogException("Resolved schema is not a RowType: " + logicalType);
     }
 
-    return rowType;
+    List<String> primaryKeys =
+        resolved
+            .getResolvedSchema()
+            .getPrimaryKey()
+            .map(pk -> List.copyOf(pk.getColumns()))
+            .orElse(Collections.emptyList());
+
+    return new TableSchemaSpec(rowType, primaryKeys);
+  }
+
+  private record TableSchemaSpec(RowType rowType, List<String> primaryKeys) {}
+
+  private static org.apache.arrow.vector.types.pojo.Schema attachPrimaryKeyMetadata(
+      org.apache.arrow.vector.types.pojo.Schema arrowSchema, List<String> primaryKeys) {
+    if (primaryKeys.isEmpty()) {
+      return arrowSchema;
+    }
+    // TODO: change to native primary key, or at least convert to json to support strange names.
+    Map<String, String> metadata = new HashMap<>(arrowSchema.getCustomMetadata());
+    metadata.put(PRIMARY_KEY_METADATA, String.join(PRIMARY_KEY_DELIMITER, primaryKeys));
+    return new org.apache.arrow.vector.types.pojo.Schema(arrowSchema.getFields(), metadata);
+  }
+
+  private static List<String> readPrimaryKeysFromMetadata(Map<String, String> customMetadata) {
+    if (customMetadata == null) {
+      return Collections.emptyList();
+    }
+    String packed = customMetadata.get(PRIMARY_KEY_METADATA);
+    if (packed == null || packed.isBlank()) {
+      return Collections.emptyList();
+    }
+    String[] parts = packed.split(PRIMARY_KEY_DELIMITER);
+    List<String> keys = new ArrayList<>(parts.length);
+    for (String p : parts) {
+      String trimmed = p.trim();
+      if (!trimmed.isEmpty()) {
+        keys.add(trimmed);
+      }
+    }
+    return keys;
+  }
+
+  private static void validatePrimaryKeysExist(RowType rowType, List<String> primaryKeys) {
+    Set<String> fields =
+        rowType.getFields().stream().map(RowType.RowField::getName).collect(Collectors.toSet());
+
+    for (String primaryKey : primaryKeys) {
+      if (!fields.contains(primaryKey)) {
+        throw new CatalogException(
+            "Primary key column '"
+                + primaryKey
+                + "' is stored in Lance metadata "
+                + "but does not exist in dataset schema");
+      }
+    }
   }
 
   @Override
@@ -480,7 +555,7 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
     throw new CatalogException("Lance namespace catalog does not support altering tables");
   }
 
-  // ==================== Partition / Function / Statistics (unsupported) ====================
+  // Partition / Function / Statistics (unsupported)
 
   @Override
   public List<CatalogPartitionSpec> listPartitions(ObjectPath tablePath) {
@@ -644,8 +719,7 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
     }
   }
 
-  // Older Lance releases do not expose structured namespace error codes.
-  // Classify namespace errors by message until the connector can move to a newer Lance version.
+  // TODO: Replace message matching with structured Lance namespace errors.
   private static boolean isNamespaceNotFound(RuntimeException e) {
     return messageContains(e, "not found");
   }
@@ -673,7 +747,7 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
   }
 
   private static List<String> tableId(ObjectPath tablePath) {
-    return Arrays.asList(tablePath.getDatabaseName(), tablePath.getObjectName());
+    return List.of(tablePath.getDatabaseName(), tablePath.getObjectName());
   }
 
   private static String normalizeDatasetPath(String location) {

@@ -88,8 +88,7 @@ class FlinkSqlDemo {
                 + ") WITH (\n"
                 + "    'connector' = 'lance',\n"
                 + "    'path' = '%s',\n"
-                + "    'write.batch-size' = '1024',\n"
-                + "    'write.mode' = 'overwrite'\n"
+                + "    'write.batch-size' = '1024'\n"
                 + ")",
             datasetPath);
 
@@ -115,8 +114,7 @@ class FlinkSqlDemo {
                 + "    embedding ARRAY<FLOAT>\n"
                 + ") WITH (\n"
                 + "    'connector' = 'lance',\n"
-                + "    'path' = '%s',\n"
-                + "    'write.mode' = 'overwrite'\n"
+                + "    'path' = '%s'\n"
                 + ")",
             path.resolve("lance-db1"));
 
@@ -187,7 +185,6 @@ class FlinkSqlDemo {
                 + "    'path' = '%s',\n"
                 + "    -- Write configuration\n"
                 + "    'write.batch-size' = '2048',\n"
-                + "    'write.mode' = 'append',\n"
                 + "    'write.max-rows-per-file' = '100000',\n"
                 + "    -- Index configuration\n"
                 + "    'index.type' = 'IVF_PQ',\n"
@@ -339,8 +336,7 @@ class FlinkSqlDemo {
                 + ") WITH (\n"
                 + "    'connector' = 'lance',\n"
                 + "    'path' = '%s',\n"
-                + "    'write.batch-size' = '100',\n"
-                + "    'write.mode' = 'append'\n"
+                + "    'write.batch-size' = '100'\n"
                 + ")",
             datasetPath);
 
@@ -388,7 +384,6 @@ class FlinkSqlDemo {
                 + "    'path' = '%s',\n"
                 + "    -- Write configuration\n"
                 + "    'write.batch-size' = '1024',\n"
-                + "    'write.mode' = 'overwrite',\n"
                 + "    -- Index configuration\n"
                 + "    'index.type' = 'IVF_PQ',\n"
                 + "    'index.column' = 'embedding',\n"
@@ -479,7 +474,6 @@ class FlinkSqlDemo {
                 + "    'connector' = 'lance',\n"
                 + "    'path' = '%s',\n"
                 + "    'write.batch-size' = '1024',\n"
-                + "    'write.mode' = 'overwrite',\n"
                 + "    -- IVF_PQ index configuration\n"
                 + "    'index.type' = 'IVF_PQ',\n"
                 + "    'index.column' = 'embedding',\n"
@@ -828,7 +822,6 @@ class FlinkSqlDemo {
     System.out.println("╠═══════════════════════════╬════════════════════════════════╣");
     System.out.println("║ path                      ║ Dataset path (required)        ║");
     System.out.println("║ write.batch-size          ║ Write batch size (default 1024)║");
-    System.out.println("║ write.mode                ║ Write mode: append/overwrite   ║");
     System.out.println("║ read.batch-size           ║ Read batch size (default 1024) ║");
     System.out.println("║ index.type                ║ Index type: IVF_PQ/IVF_HNSW/IVF_FLAT║");
     System.out.println("║ index.column              ║ Index column name              ║");
