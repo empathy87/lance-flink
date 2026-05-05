@@ -20,6 +20,7 @@ import org.apache.flink.connector.lance.sink.LanceUpsertSinkV2;
 import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.table.connector.sink.DynamicTableSink;
 import org.apache.flink.table.connector.sink.SinkV2Provider;
+import org.apache.flink.table.connector.sink.abilities.SupportsOverwrite;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.RowKind;
@@ -27,11 +28,12 @@ import org.apache.flink.types.RowKind;
 import java.util.List;
 
 /** Dynamic table sink for Lance datasets. */
-public class LanceDynamicTableSink implements DynamicTableSink {
+public class LanceDynamicTableSink implements DynamicTableSink, SupportsOverwrite {
 
   private final LanceOptions options;
   private final DataType physicalDataType;
   private final List<String> primaryKeys;
+  private boolean overwrite;
 
   public LanceDynamicTableSink(LanceOptions options, DataType physicalDataType) {
     this(options, physicalDataType, List.of());
@@ -39,14 +41,23 @@ public class LanceDynamicTableSink implements DynamicTableSink {
 
   public LanceDynamicTableSink(
       LanceOptions options, DataType physicalDataType, List<String> primaryKeys) {
+    this(options, physicalDataType, primaryKeys, false);
+  }
+
+  public LanceDynamicTableSink(
+      LanceOptions options,
+      DataType physicalDataType,
+      List<String> primaryKeys,
+      boolean overwrite) {
     this.options = options;
     this.physicalDataType = physicalDataType;
     this.primaryKeys = List.copyOf(primaryKeys);
+    this.overwrite = overwrite;
   }
 
   @Override
   public ChangelogMode getChangelogMode(ChangelogMode requestedMode) {
-    if (primaryKeys.isEmpty() || requestedMode.containsOnly(RowKind.INSERT)) {
+    if (overwrite || primaryKeys.isEmpty() || requestedMode.containsOnly(RowKind.INSERT)) {
       return ChangelogMode.insertOnly();
     }
     return ChangelogMode.upsert();
@@ -54,16 +65,24 @@ public class LanceDynamicTableSink implements DynamicTableSink {
 
   @Override
   public SinkRuntimeProvider getSinkRuntimeProvider(Context context) {
+    if (overwrite && !context.isBounded()) {
+      throw new UnsupportedOperationException("Lance doesn't support streaming INSERT OVERWRITE.");
+    }
     RowType rowType = (RowType) physicalDataType.getLogicalType();
     if (primaryKeys.isEmpty()) {
-      return SinkV2Provider.of(new LanceSinkV2(options, rowType));
+      return SinkV2Provider.of(new LanceSinkV2(options, rowType, overwrite));
     }
-    return SinkV2Provider.of(new LanceUpsertSinkV2(options, rowType, primaryKeys));
+    return SinkV2Provider.of(new LanceUpsertSinkV2(options, rowType, primaryKeys, overwrite));
+  }
+
+  @Override
+  public void applyOverwrite(boolean overwrite) {
+    this.overwrite = overwrite;
   }
 
   @Override
   public DynamicTableSink copy() {
-    return new LanceDynamicTableSink(options, physicalDataType, primaryKeys);
+    return new LanceDynamicTableSink(options, physicalDataType, primaryKeys, overwrite);
   }
 
   @Override
@@ -81,5 +100,9 @@ public class LanceDynamicTableSink implements DynamicTableSink {
 
   public List<String> getPrimaryKeys() {
     return primaryKeys;
+  }
+
+  public boolean isOverwrite() {
+    return overwrite;
   }
 }

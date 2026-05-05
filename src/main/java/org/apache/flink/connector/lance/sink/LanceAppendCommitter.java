@@ -43,18 +43,24 @@ public class LanceAppendCommitter implements Committer<LanceAppendCommittable> {
   private final LanceOptions options;
   private final Schema arrowSchema;
   private final BufferAllocator allocator;
+  private final boolean overwrite;
 
   public LanceAppendCommitter(LanceOptions options, RowType rowType) {
+    this(options, rowType, false);
+  }
+
+  public LanceAppendCommitter(LanceOptions options, RowType rowType, boolean overwrite) {
     this.options = options;
     this.arrowSchema = LanceTypeConverter.toArrowSchema(rowType);
     // TODO: Use bounded task-scoped Arrow allocator.
     this.allocator = new RootAllocator(Long.MAX_VALUE);
+    this.overwrite = overwrite;
   }
 
   @Override
   public void commit(Collection<CommitRequest<LanceAppendCommittable>> requests)
       throws IOException, InterruptedException {
-    if (requests.isEmpty()) {
+    if (requests.isEmpty() && !overwrite) {
       return;
     }
 
@@ -63,16 +69,17 @@ public class LanceAppendCommitter implements Committer<LanceAppendCommittable> {
     for (CommitRequest<LanceAppendCommittable> request : requests) {
       fragments.addAll(request.getCommittable().fragments());
     }
-    if (fragments.isEmpty()) {
+    if (fragments.isEmpty() && !overwrite) {
       return;
     }
 
     String datasetPath = options.getPath();
     // TODO: Avoid probe-then-commit race for first dataset commit.
     boolean datasetExists = datasetHasManifest(datasetPath);
+    boolean useOverwrite = overwrite || !datasetExists;
 
     try {
-      if (!datasetExists) {
+      if (useOverwrite) {
         // TODO: Fail closed instead of overwriting existing data on uncertain existence.
         commitOverwrite(datasetPath, fragments);
       } else {
@@ -83,7 +90,7 @@ public class LanceAppendCommitter implements Committer<LanceAppendCommittable> {
           "Committed {} fragment(s) from {} request(s) via {} to {}",
           fragments.size(),
           requests.size(),
-          datasetExists ? "Append" : "Overwrite",
+          useOverwrite ? "Overwrite" : "Append",
           datasetPath);
     } catch (Exception e) {
       throw new IOException("Failed to commit Lance transaction", e);

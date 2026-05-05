@@ -51,8 +51,14 @@ public class LanceUpsertSinkV2
   private final RowType rowType;
   private final List<String> primaryKeys;
   private final int[] primaryKeyIndexes;
+  private final boolean overwrite;
 
   public LanceUpsertSinkV2(LanceOptions options, RowType rowType, List<String> primaryKeys) {
+    this(options, rowType, primaryKeys, false);
+  }
+
+  public LanceUpsertSinkV2(
+      LanceOptions options, RowType rowType, List<String> primaryKeys, boolean overwrite) {
     if (primaryKeys == null || primaryKeys.isEmpty()) {
       throw new IllegalArgumentException("LanceUpsertSinkV2 requires at least one primary key");
     }
@@ -60,6 +66,7 @@ public class LanceUpsertSinkV2
     this.rowType = rowType;
     this.primaryKeys = List.copyOf(primaryKeys);
     this.primaryKeyIndexes = resolvePrimaryKeyIndexes(rowType, this.primaryKeys);
+    this.overwrite = overwrite;
   }
 
   @SuppressWarnings("deprecation")
@@ -80,7 +87,7 @@ public class LanceUpsertSinkV2
   @Override
   public Committer<LanceUpsertCommittable> createCommitter(CommitterInitContext context)
       throws IOException {
-    return new LanceUpsertCommitter(options, primaryKeys);
+    return new LanceUpsertCommitter(options, rowType, primaryKeys, overwrite);
   }
 
   @Override
@@ -115,6 +122,10 @@ public class LanceUpsertSinkV2
 
   public List<String> getPrimaryKeys() {
     return primaryKeys;
+  }
+
+  public boolean isOverwrite() {
+    return overwrite;
   }
 
   private static int[] resolvePrimaryKeyIndexes(RowType rowType, List<String> primaryKeys) {

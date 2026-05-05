@@ -73,6 +73,87 @@ class LanceSinkV2SqlITCase {
   }
 
   @Test
+  void testInsertOverwriteReplacesExistingRows() throws Exception {
+    String datasetUri = tempDir.resolve("overwrite-dataset").toUri().toString();
+    EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
+    TableEnvironment tableEnv = TableEnvironment.create(settings);
+    String tableDdl =
+        "CREATE TABLE t (id BIGINT, name STRING) WITH ("
+            + "'connector' = 'lance', "
+            + "'path' = "
+            + sql(datasetUri)
+            + ")";
+    tableEnv.executeSql(tableDdl);
+
+    tableEnv.executeSql("INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')").await();
+    tableEnv.executeSql("INSERT OVERWRITE t VALUES (10, 'x'), (20, 'y')").await();
+
+    assertThat(rowCount(datasetUri)).isEqualTo(2L);
+    assertThat(readIdColumn(datasetUri)).containsExactlyInAnyOrder(10L, 20L);
+  }
+
+  @Test
+  void testInsertOverwriteRejectedInStreamingMode() {
+    String datasetUri = tempDir.resolve("overwrite-stream").toUri().toString();
+    EnvironmentSettings settings = EnvironmentSettings.newInstance().inStreamingMode().build();
+    TableEnvironment tableEnv = TableEnvironment.create(settings);
+    String tableDdl =
+        "CREATE TABLE t (id BIGINT, name STRING) WITH ("
+            + "'connector' = 'lance', "
+            + "'path' = "
+            + sql(datasetUri)
+            + ")";
+    tableEnv.executeSql(tableDdl);
+
+    assertThat(
+            org.assertj.core.api.Assertions.catchThrowable(
+                () -> tableEnv.executeSql("INSERT OVERWRITE t VALUES (1, 'x')")))
+        .isInstanceOf(UnsupportedOperationException.class)
+        .hasMessage("Lance doesn't support streaming INSERT OVERWRITE.");
+  }
+
+  @Test
+  void testInsertOverwriteOnPrimaryKeyTableTruncatesAndAppends() throws Exception {
+    String datasetUri = tempDir.resolve("overwrite-pk").toUri().toString();
+    EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
+    TableEnvironment tableEnv = TableEnvironment.create(settings);
+    String tableDdl =
+        "CREATE TABLE t (id BIGINT, name STRING, PRIMARY KEY (id) NOT ENFORCED) WITH ("
+            + "'connector' = 'lance', "
+            + "'path' = "
+            + sql(datasetUri)
+            + ")";
+    tableEnv.executeSql(tableDdl);
+
+    tableEnv.executeSql("INSERT OVERWRITE t VALUES (1, 'a'), (2, 'b'), (3, 'c')").await();
+    tableEnv.executeSql("INSERT OVERWRITE t VALUES (10, 'x'), (20, 'y')").await();
+
+    assertThat(rowCount(datasetUri)).isEqualTo(2L);
+    assertThat(readIdColumn(datasetUri)).containsExactlyInAnyOrder(10L, 20L);
+  }
+
+  @Test
+  void testInsertOverwriteOnPrimaryKeyTableDeduplicatesByKey() throws Exception {
+    String datasetUri = tempDir.resolve("overwrite-pk-dedup").toUri().toString();
+    EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
+    TableEnvironment tableEnv = TableEnvironment.create(settings);
+    String tableDdl =
+        "CREATE TABLE t (id BIGINT, name STRING, PRIMARY KEY (id) NOT ENFORCED) WITH ("
+            + "'connector' = 'lance', "
+            + "'path' = "
+            + sql(datasetUri)
+            + ")";
+    tableEnv.executeSql(tableDdl);
+
+    tableEnv
+        .executeSql("INSERT OVERWRITE t VALUES (1, 'a'), (1, 'b'), (2, 'c'), (2, 'd'), (3, 'e')")
+        .await();
+
+    assertThat(rowCount(datasetUri)).isEqualTo(3L);
+    assertThat(readIdColumn(datasetUri)).containsExactlyInAnyOrder(1L, 2L, 3L);
+  }
+
+  @Test
   void testDataStreamSinkToWritesRowsThroughV2WithMultipleWriters() throws Exception {
     String datasetUri = tempDir.resolve("ds-dataset").toUri().toString();
     LanceOptions options = LanceOptions.builder().path(datasetUri).writeBatchSize(8).build();

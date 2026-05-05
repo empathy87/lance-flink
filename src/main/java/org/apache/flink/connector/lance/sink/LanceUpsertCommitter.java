@@ -14,18 +14,24 @@
 package org.apache.flink.connector.lance.sink;
 
 import org.apache.flink.connector.lance.config.LanceOptions;
+import org.apache.flink.connector.lance.converter.LanceTypeConverter;
 
+import org.lance.CommitBuilder;
 import org.lance.Dataset;
+import org.lance.Transaction;
 import org.lance.merge.MergeInsertParams;
 import org.lance.merge.MergeInsertResult;
+import org.lance.operation.Overwrite;
 
 import org.apache.flink.api.connector.sink2.Committer;
+import org.apache.flink.table.types.logical.RowType;
 
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -35,6 +41,7 @@ import java.nio.channels.Channels;
 import java.nio.channels.ReadableByteChannel;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 
 /** Applies Lance merge-insert committables. */
 public class LanceUpsertCommitter implements Committer<LanceUpsertCommittable> {
@@ -46,13 +53,27 @@ public class LanceUpsertCommitter implements Committer<LanceUpsertCommittable> {
   private final LanceOptions options;
   private final List<String> primaryKeys;
   private final BufferAllocator allocator;
+  private final Schema arrowSchema;
+  private final boolean overwrite;
+  private boolean truncated;
 
   public LanceUpsertCommitter(LanceOptions options, List<String> primaryKeys) {
+    this(options, null, primaryKeys, false);
+  }
+
+  public LanceUpsertCommitter(
+      LanceOptions options, RowType rowType, List<String> primaryKeys, boolean overwrite) {
     if (primaryKeys == null || primaryKeys.isEmpty()) {
       throw new IllegalArgumentException("LanceUpsertCommitter requires at least one primary key");
     }
+    if (overwrite && rowType == null) {
+      throw new IllegalArgumentException(
+          "Overwrite mode requires a non-null row type for truncate");
+    }
     this.options = options;
     this.primaryKeys = List.copyOf(primaryKeys);
+    this.overwrite = overwrite;
+    this.arrowSchema = rowType == null ? null : LanceTypeConverter.toArrowSchema(rowType);
     // TODO: Use bounded task-scoped Arrow allocator.
     this.allocator = new RootAllocator(Long.MAX_VALUE);
   }
@@ -60,8 +81,18 @@ public class LanceUpsertCommitter implements Committer<LanceUpsertCommittable> {
   @Override
   public void commit(Collection<CommitRequest<LanceUpsertCommittable>> requests)
       throws IOException, InterruptedException {
-    if (requests.isEmpty()) {
+    if (requests.isEmpty() && !overwrite) {
       return;
+    }
+
+    if (overwrite && !truncated) {
+      try {
+        // TODO: Commit INSERT OVERWRITE atomically with writer-produced fragments.
+        truncateDataset();
+      } catch (Exception e) {
+        throw new IOException("Failed to truncate Lance dataset for INSERT OVERWRITE", e);
+      }
+      truncated = true;
     }
 
     // TODO: Make merge-insert commits idempotent across Flink retries.
@@ -76,22 +107,33 @@ public class LanceUpsertCommitter implements Committer<LanceUpsertCommittable> {
     }
   }
 
+  private void truncateDataset() {
+    Overwrite operation = Overwrite.builder().fragments(List.of()).schema(arrowSchema).build();
+    String datasetPath = options.getPath();
+    try (Transaction txn = new Transaction.Builder().operation(operation).build();
+        Dataset dataset =
+            new CommitBuilder(datasetPath, allocator).writeParams(Map.of()).execute(txn)) {}
+    LOG.info("Truncated Lance dataset at {} for INSERT OVERWRITE", datasetPath);
+  }
+
   private void applyOne(Dataset dataset, LanceUpsertCommittable committable) throws Exception {
     // TODO: Validate IPC schema against dataset schema.
     MergeInsertParams params = mergeInsertParams(committable.mode());
 
+    MergeInsertResult result = null;
     try (ByteArrayInputStream bytes = new ByteArrayInputStream(committable.arrowIpcBytes());
         ReadableByteChannel channel = Channels.newChannel(bytes);
         ArrowStreamReader reader = new ArrowStreamReader(channel, allocator);
         ArrowArrayStream stream = ArrowArrayStream.allocateNew(allocator)) {
       Data.exportArrayStream(allocator, reader, stream);
-      MergeInsertResult result = dataset.mergeInsert(params, stream);
-      closeResultDataset(result);
+      result = dataset.mergeInsert(params, stream);
       LOG.debug(
           "Committed {} {} row(s) from subtask {}",
           committable.rowCount(),
           committable.mode(),
           committable.subtaskId());
+    } finally {
+      closeResultDatasetQuietly(result);
     }
   }
 
@@ -107,10 +149,15 @@ public class LanceUpsertCommitter implements Committer<LanceUpsertCommittable> {
     };
   }
 
-  private static void closeResultDataset(MergeInsertResult result) throws Exception {
+  private static void closeResultDatasetQuietly(MergeInsertResult result) {
     // TODO: MergeInsertResult may carry more than just `dataset()`
-    if (result != null && result.dataset() != null) {
+    if (result == null || result.dataset() == null) {
+      return;
+    }
+    try {
       result.dataset().close();
+    } catch (Exception e) {
+      LOG.warn("Failed to close merge-insert result dataset", e);
     }
   }
 

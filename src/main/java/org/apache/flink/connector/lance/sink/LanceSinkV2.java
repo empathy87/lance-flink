@@ -50,10 +50,16 @@ public class LanceSinkV2
 
   private final LanceOptions options;
   private final RowType rowType;
+  private final boolean overwrite;
 
   public LanceSinkV2(LanceOptions options, RowType rowType) {
+    this(options, rowType, false);
+  }
+
+  public LanceSinkV2(LanceOptions options, RowType rowType, boolean overwrite) {
     this.options = options;
     this.rowType = rowType;
+    this.overwrite = overwrite;
   }
 
   @SuppressWarnings("deprecation")
@@ -76,7 +82,7 @@ public class LanceSinkV2
   @Override
   public Committer<LanceAppendCommittable> createCommitter(CommitterInitContext context)
       throws IOException {
-    return new LanceAppendCommitter(options, rowType);
+    return new LanceAppendCommitter(options, rowType, overwrite);
   }
 
   @Override
@@ -115,5 +121,9 @@ public class LanceSinkV2
 
   public RowType getRowType() {
     return rowType;
+  }
+
+  public boolean isOverwrite() {
+    return overwrite;
   }
 }
