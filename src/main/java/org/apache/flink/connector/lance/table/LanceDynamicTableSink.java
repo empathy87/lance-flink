@@ -17,18 +17,24 @@ import org.apache.flink.connector.lance.config.LanceOptions;
 import org.apache.flink.connector.lance.sink.LanceSinkV2;
 import org.apache.flink.connector.lance.sink.LanceUpsertSinkV2;
 
+import org.lance.Dataset;
+
 import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.table.connector.sink.DynamicTableSink;
 import org.apache.flink.table.connector.sink.SinkV2Provider;
 import org.apache.flink.table.connector.sink.abilities.SupportsOverwrite;
+import org.apache.flink.table.connector.sink.abilities.SupportsTruncate;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.RowKind;
 
+import org.apache.arrow.memory.RootAllocator;
+
 import java.util.List;
 
 /** Dynamic table sink for Lance datasets. */
-public class LanceDynamicTableSink implements DynamicTableSink, SupportsOverwrite {
+public class LanceDynamicTableSink
+    implements DynamicTableSink, SupportsOverwrite, SupportsTruncate {
 
   private final LanceOptions options;
   private final DataType physicalDataType;
@@ -78,6 +84,18 @@ public class LanceDynamicTableSink implements DynamicTableSink, SupportsOverwrit
   @Override
   public void applyOverwrite(boolean overwrite) {
     this.overwrite = overwrite;
+  }
+
+  @Override
+  public void executeTruncation() {
+    String datasetPath = options.getPath();
+
+    try (RootAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        Dataset dataset = Dataset.open().allocator(allocator).uri(datasetPath).build()) {
+      dataset.truncateTable();
+    } catch (Exception e) {
+      throw new RuntimeException("Failed to truncate Lance dataset at " + datasetPath, e);
+    }
   }
 
   @Override

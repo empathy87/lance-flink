@@ -93,6 +93,58 @@ class LanceSinkV2SqlITCase {
   }
 
   @Test
+  void testTruncateTableEmptiesDataset() throws Exception {
+    String datasetUri = tempDir.resolve("truncate-dataset").toUri().toString();
+    EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
+    TableEnvironment tableEnv = TableEnvironment.create(settings);
+    String tableDdl =
+        "CREATE TABLE t (id BIGINT, name STRING) WITH ("
+            + "'connector' = 'lance', "
+            + "'path' = "
+            + sql(datasetUri)
+            + ")";
+    tableEnv.executeSql(tableDdl);
+
+    tableEnv.executeSql("INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')").await();
+    assertThat(rowCount(datasetUri)).isEqualTo(3L);
+
+    tableEnv.executeSql("TRUNCATE TABLE t");
+    assertThat(rowCount(datasetUri)).isEqualTo(0L);
+
+    // Truncated dataset still accepts new appends — schema survives the empty Overwrite.
+    tableEnv.executeSql("INSERT INTO t VALUES (10, 'x')").await();
+    assertThat(rowCount(datasetUri)).isEqualTo(1L);
+    assertThat(readIdColumn(datasetUri)).containsExactly(10L);
+  }
+
+  @Test
+  void testTruncateTableEmptiesPrimaryKeyTable() throws Exception {
+    String datasetUri = tempDir.resolve("truncate-pk").toUri().toString();
+    EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
+    TableEnvironment tableEnv = TableEnvironment.create(settings);
+    String tableDdl =
+        "CREATE TABLE t (id BIGINT, name STRING, PRIMARY KEY (id) NOT ENFORCED) WITH ("
+            + "'connector' = 'lance', "
+            + "'path' = "
+            + sql(datasetUri)
+            + ")";
+    tableEnv.executeSql(tableDdl);
+
+    // Seed via INSERT OVERWRITE: LanceUpsertCommitter requires the dataset to already exist.
+    tableEnv.executeSql("INSERT OVERWRITE t VALUES (1, 'a'), (2, 'b'), (3, 'c')").await();
+    assertThat(rowCount(datasetUri)).isEqualTo(3L);
+
+    tableEnv.executeSql("TRUNCATE TABLE t");
+    assertThat(rowCount(datasetUri)).isEqualTo(0L);
+
+    // Truncate must leave the dataset (schema + PK metadata) on disk so subsequent upserts
+    // can Dataset.open() it without going through INSERT OVERWRITE again.
+    tableEnv.executeSql("INSERT INTO t VALUES (10, 'x'), (20, 'y')").await();
+    assertThat(rowCount(datasetUri)).isEqualTo(2L);
+    assertThat(readIdColumn(datasetUri)).containsExactlyInAnyOrder(10L, 20L);
+  }
+
+  @Test
   void testInsertOverwriteRejectedInStreamingMode() {
     String datasetUri = tempDir.resolve("overwrite-stream").toUri().toString();
     EnvironmentSettings settings = EnvironmentSettings.newInstance().inStreamingMode().build();
