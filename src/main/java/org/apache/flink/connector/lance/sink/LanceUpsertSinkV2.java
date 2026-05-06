@@ -52,21 +52,38 @@ public class LanceUpsertSinkV2
   private final List<String> primaryKeys;
   private final int[] primaryKeyIndexes;
   private final boolean overwrite;
+  private final RowLevelOperation rowLevelOperation;
 
   public LanceUpsertSinkV2(LanceOptions options, RowType rowType, List<String> primaryKeys) {
-    this(options, rowType, primaryKeys, false);
+    this(options, rowType, primaryKeys, false, RowLevelOperation.NONE);
   }
 
   public LanceUpsertSinkV2(
       LanceOptions options, RowType rowType, List<String> primaryKeys, boolean overwrite) {
+    this(options, rowType, primaryKeys, overwrite, RowLevelOperation.NONE);
+  }
+
+  public LanceUpsertSinkV2(
+      LanceOptions options,
+      RowType rowType,
+      List<String> primaryKeys,
+      boolean overwrite,
+      RowLevelOperation rowLevelOperation) {
     if (primaryKeys == null || primaryKeys.isEmpty()) {
       throw new IllegalArgumentException("LanceUpsertSinkV2 requires at least one primary key");
+    }
+    if (overwrite && rowLevelOperation != RowLevelOperation.NONE) {
+      throw new IllegalArgumentException(
+          "Cannot combine INSERT OVERWRITE with row-level "
+              + rowLevelOperation
+              + " on the same sink instance");
     }
     this.options = options;
     this.rowType = rowType;
     this.primaryKeys = List.copyOf(primaryKeys);
     this.primaryKeyIndexes = resolvePrimaryKeyIndexes(rowType, this.primaryKeys);
     this.overwrite = overwrite;
+    this.rowLevelOperation = rowLevelOperation;
   }
 
   @SuppressWarnings("deprecation")
@@ -87,7 +104,7 @@ public class LanceUpsertSinkV2
   @Override
   public Committer<LanceUpsertCommittable> createCommitter(CommitterInitContext context)
       throws IOException {
-    return new LanceUpsertCommitter(options, rowType, primaryKeys, overwrite);
+    return new LanceUpsertCommitter(options, rowType, primaryKeys, overwrite, rowLevelOperation);
   }
 
   @Override

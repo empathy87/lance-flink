@@ -42,6 +42,7 @@ import java.nio.channels.ReadableByteChannel;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /** Applies Lance merge-insert committables. */
 public class LanceUpsertCommitter implements Committer<LanceUpsertCommittable> {
@@ -56,13 +57,20 @@ public class LanceUpsertCommitter implements Committer<LanceUpsertCommittable> {
   private final Schema arrowSchema;
   private final boolean overwrite;
   private boolean truncated;
+  private final RowLevelOperation rowLevelOperation;
 
   public LanceUpsertCommitter(LanceOptions options, List<String> primaryKeys) {
-    this(options, null, primaryKeys, false);
+    this(options, null, primaryKeys, false, RowLevelOperation.NONE);
   }
 
   public LanceUpsertCommitter(
-      LanceOptions options, RowType rowType, List<String> primaryKeys, boolean overwrite) {
+      LanceOptions options,
+      RowType rowType,
+      List<String> primaryKeys,
+      boolean overwrite,
+      RowLevelOperation rowLevelOperation) {
+    RowLevelOperation operation = Objects.requireNonNull(rowLevelOperation, "rowLevelOperation");
+
     if (primaryKeys == null || primaryKeys.isEmpty()) {
       throw new IllegalArgumentException("LanceUpsertCommitter requires at least one primary key");
     }
@@ -70,12 +78,20 @@ public class LanceUpsertCommitter implements Committer<LanceUpsertCommittable> {
       throw new IllegalArgumentException(
           "Overwrite mode requires a non-null row type for truncate");
     }
+    if (overwrite && operation != RowLevelOperation.NONE) {
+      throw new IllegalArgumentException(
+          "Cannot combine INSERT OVERWRITE with row-level "
+              + operation
+              + " on the same committer instance");
+    }
+
     this.options = options;
     this.primaryKeys = List.copyOf(primaryKeys);
     this.overwrite = overwrite;
     this.arrowSchema = rowType == null ? null : LanceTypeConverter.toArrowSchema(rowType);
     // TODO: Use bounded task-scoped Arrow allocator.
     this.allocator = new RootAllocator(Long.MAX_VALUE);
+    this.rowLevelOperation = operation;
   }
 
   @Override
@@ -140,6 +156,24 @@ public class LanceUpsertCommitter implements Committer<LanceUpsertCommittable> {
   private MergeInsertParams mergeInsertParams(LanceUpsertCommittable.Mode mode) {
     MergeInsertParams params =
         new MergeInsertParams(primaryKeys).withConflictRetries(CONFLICT_RETRIES);
+
+    if (rowLevelOperation == RowLevelOperation.UPDATE) {
+      if (mode != LanceUpsertCommittable.Mode.UPSERT) {
+        throw new IllegalArgumentException(
+            "Unexpected " + mode + " committable for row-level UPDATE");
+      }
+      return params
+          .withMatchedUpdateAll()
+          .withNotMatched(MergeInsertParams.WhenNotMatched.DoNothing);
+    }
+
+    if (rowLevelOperation == RowLevelOperation.DELETE) {
+      if (mode != LanceUpsertCommittable.Mode.DELETE) {
+        throw new IllegalArgumentException(
+            "Unexpected " + mode + " committable for row-level DELETE");
+      }
+      return params.withMatchedDelete().withNotMatched(MergeInsertParams.WhenNotMatched.DoNothing);
+    }
 
     return switch (mode) {
       case UPSERT ->

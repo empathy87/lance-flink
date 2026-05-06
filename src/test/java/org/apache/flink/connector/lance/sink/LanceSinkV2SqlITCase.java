@@ -37,12 +37,15 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 /**
  * SQL-level checks that exercise V2-specific behaviors that aren't covered by the legacy-style
@@ -206,6 +209,109 @@ class LanceSinkV2SqlITCase {
   }
 
   @Test
+  void testRowLevelUpdateUpdatesMatchingRowsOnly() throws Exception {
+    String datasetUri = tempDir.resolve("update-pk").toUri().toString();
+    EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
+    TableEnvironment tableEnv = TableEnvironment.create(settings);
+    String tableDdl =
+        "CREATE TABLE t (id BIGINT, name STRING, PRIMARY KEY (id) NOT ENFORCED) WITH ("
+            + "'connector' = 'lance', "
+            + "'path' = "
+            + sql(datasetUri)
+            + ")";
+    tableEnv.executeSql(tableDdl);
+
+    // INSERT OVERWRITE seeds the dataset because mergeInsert needs an existing dataset.
+    tableEnv.executeSql("INSERT OVERWRITE t VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')").await();
+
+    tableEnv.executeSql("UPDATE t SET name = 'updated' WHERE id IN (2, 3)").await();
+
+    assertThat(rowCount(datasetUri)).isEqualTo(4L);
+    assertThat(readIdNamePairs(datasetUri))
+        .containsOnly(
+            Map.entry(1L, "a"),
+            Map.entry(2L, "updated"),
+            Map.entry(3L, "updated"),
+            Map.entry(4L, "d"));
+  }
+
+  @Test
+  void testRowLevelDeleteRemovesMatchingRows() throws Exception {
+    String datasetUri = tempDir.resolve("delete-pk").toUri().toString();
+    EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
+    TableEnvironment tableEnv = TableEnvironment.create(settings);
+    String tableDdl =
+        "CREATE TABLE t (id BIGINT, name STRING, PRIMARY KEY (id) NOT ENFORCED) WITH ("
+            + "'connector' = 'lance', "
+            + "'path' = "
+            + sql(datasetUri)
+            + ")";
+    tableEnv.executeSql(tableDdl);
+
+    tableEnv.executeSql("INSERT OVERWRITE t VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')").await();
+
+    tableEnv.executeSql("DELETE FROM t WHERE id > 2").await();
+
+    assertThat(rowCount(datasetUri)).isEqualTo(2L);
+    assertThat(readIdColumn(datasetUri)).containsExactlyInAnyOrder(1L, 2L);
+  }
+
+  @Test
+  void testRowLevelUpdateRejectedWithoutPrimaryKey() {
+    String datasetUri = tempDir.resolve("update-no-pk").toUri().toString();
+    EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
+    TableEnvironment tableEnv = TableEnvironment.create(settings);
+    String tableDdl =
+        "CREATE TABLE t (id BIGINT, name STRING) WITH ("
+            + "'connector' = 'lance', "
+            + "'path' = "
+            + sql(datasetUri)
+            + ")";
+    tableEnv.executeSql(tableDdl);
+
+    assertThat(catchThrowable(() -> tableEnv.executeSql("UPDATE t SET name = 'x' WHERE id = 1")))
+        .isInstanceOf(UnsupportedOperationException.class)
+        .hasMessageContaining("Lance row-level UPDATE requires a PRIMARY KEY");
+  }
+
+  @Test
+  void testRowLevelDeleteRejectedWithoutPrimaryKey() {
+    String datasetUri = tempDir.resolve("delete-no-pk").toUri().toString();
+    EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
+    TableEnvironment tableEnv = TableEnvironment.create(settings);
+    String tableDdl =
+        "CREATE TABLE t (id BIGINT, name STRING) WITH ("
+            + "'connector' = 'lance', "
+            + "'path' = "
+            + sql(datasetUri)
+            + ")";
+    tableEnv.executeSql(tableDdl);
+
+    assertThat(catchThrowable(() -> tableEnv.executeSql("DELETE FROM t WHERE id = 1")))
+        .isInstanceOf(UnsupportedOperationException.class)
+        .hasMessageContaining("Lance row-level DELETE requires a PRIMARY KEY");
+  }
+
+  @Test
+  void testRowLevelUpdateRejectsPrimaryKeyColumn() throws Exception {
+    String datasetUri = tempDir.resolve("update-pk-col").toUri().toString();
+    EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
+    TableEnvironment tableEnv = TableEnvironment.create(settings);
+    String tableDdl =
+        "CREATE TABLE t (id BIGINT, name STRING, PRIMARY KEY (id) NOT ENFORCED) WITH ("
+            + "'connector' = 'lance', "
+            + "'path' = "
+            + sql(datasetUri)
+            + ")";
+    tableEnv.executeSql(tableDdl);
+    tableEnv.executeSql("INSERT OVERWRITE t VALUES (1, 'a')").await();
+
+    assertThat(catchThrowable(() -> tableEnv.executeSql("UPDATE t SET id = 99 WHERE id = 1")))
+        .isInstanceOf(UnsupportedOperationException.class)
+        .hasMessageContaining("Updating primary key columns is not supported");
+  }
+
+  @Test
   void testDataStreamSinkToWritesRowsThroughV2WithMultipleWriters() throws Exception {
     String datasetUri = tempDir.resolve("ds-dataset").toUri().toString();
     LanceOptions options = LanceOptions.builder().path(datasetUri).writeBatchSize(8).build();
@@ -334,6 +440,27 @@ class LanceSinkV2SqlITCase {
       }
     }
     return ids;
+  }
+
+  private static Map<Long, String> readIdNamePairs(String uri) throws Exception {
+    Map<Long, String> pairs = new HashMap<>();
+    try (RootAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        Dataset dataset = Dataset.open(uri, allocator);
+        org.lance.ipc.LanceScanner scanner = dataset.newScan();
+        org.apache.arrow.vector.ipc.ArrowReader reader = scanner.scanBatches()) {
+      while (reader.loadNextBatch()) {
+        org.apache.arrow.vector.VectorSchemaRoot root = reader.getVectorSchemaRoot();
+        org.apache.arrow.vector.BigIntVector idVec =
+            (org.apache.arrow.vector.BigIntVector) root.getVector("id");
+        org.apache.arrow.vector.VarCharVector nameVec =
+            (org.apache.arrow.vector.VarCharVector) root.getVector("name");
+        for (int i = 0; i < root.getRowCount(); i++) {
+          pairs.put(
+              idVec.get(i), new String(nameVec.get(i), java.nio.charset.StandardCharsets.UTF_8));
+        }
+      }
+    }
+    return pairs;
   }
 
   /** Tiny helper for "all longs in [from, to)". */
