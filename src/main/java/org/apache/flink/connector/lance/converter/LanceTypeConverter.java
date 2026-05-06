@@ -351,47 +351,44 @@ public class LanceTypeConverter implements Serializable {
    * @return Flink DataType
    */
   public static DataType toDataType(LogicalType logicalType) {
+    DataType dataType;
     if (logicalType instanceof TinyIntType) {
-      return DataTypes.TINYINT();
+      dataType = DataTypes.TINYINT();
     } else if (logicalType instanceof SmallIntType) {
-      return DataTypes.SMALLINT();
+      dataType = DataTypes.SMALLINT();
     } else if (logicalType instanceof IntType) {
-      return DataTypes.INT();
+      dataType = DataTypes.INT();
     } else if (logicalType instanceof BigIntType) {
-      return DataTypes.BIGINT();
+      dataType = DataTypes.BIGINT();
     } else if (logicalType instanceof FloatType) {
-      return DataTypes.FLOAT();
+      dataType = DataTypes.FLOAT();
     } else if (logicalType instanceof DoubleType) {
-      return DataTypes.DOUBLE();
+      dataType = DataTypes.DOUBLE();
     } else if (logicalType instanceof VarCharType) {
-      return DataTypes.STRING();
+      dataType = DataTypes.STRING();
     } else if (logicalType instanceof BooleanType) {
-      return DataTypes.BOOLEAN();
+      dataType = DataTypes.BOOLEAN();
     } else if (logicalType instanceof VarBinaryType) {
-      return DataTypes.BYTES();
-    } else if (logicalType instanceof BinaryType) {
-      BinaryType binaryType = (BinaryType) logicalType;
-      return DataTypes.BINARY(binaryType.getLength());
+      dataType = DataTypes.BYTES();
+    } else if (logicalType instanceof BinaryType binaryType) {
+      dataType = DataTypes.BINARY(binaryType.getLength());
     } else if (logicalType instanceof DateType) {
-      return DataTypes.DATE();
-    } else if (logicalType instanceof TimestampType) {
-      TimestampType tsType = (TimestampType) logicalType;
-      return DataTypes.TIMESTAMP(tsType.getPrecision());
-    } else if (logicalType instanceof ArrayType) {
-      ArrayType arrayType = (ArrayType) logicalType;
-      DataType elementDataType = toDataType(arrayType.getElementType());
-      return DataTypes.ARRAY(elementDataType);
-    } else if (logicalType instanceof RowType) {
-      RowType rowType = (RowType) logicalType;
+      dataType = DataTypes.DATE();
+    } else if (logicalType instanceof TimestampType tsType) {
+      dataType = DataTypes.TIMESTAMP(tsType.getPrecision());
+    } else if (logicalType instanceof ArrayType arrayType) {
+      dataType = DataTypes.ARRAY(toDataType(arrayType.getElementType()));
+    } else if (logicalType instanceof RowType rowType) {
       DataTypes.Field[] fields =
           rowType.getFields().stream()
               .map(f -> DataTypes.FIELD(f.getName(), toDataType(f.getType())))
               .toArray(DataTypes.Field[]::new);
-      return DataTypes.ROW(fields);
+      dataType = DataTypes.ROW(fields);
+    } else {
+      throw new UnsupportedTypeException(
+          "Unsupported LogicalType: " + logicalType.getClass().getSimpleName());
     }
-
-    throw new UnsupportedTypeException(
-        "Unsupported LogicalType: " + logicalType.getClass().getSimpleName());
+    return logicalType.isNullable() ? dataType : dataType.notNull();
   }
 
   /** Get Flink Timestamp precision based on Arrow TimeUnit */

@@ -16,6 +16,11 @@ package org.apache.flink.connector.lance.table;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.TableResult;
+import org.apache.flink.table.catalog.Catalog;
+import org.apache.flink.table.catalog.CatalogBaseTable;
+import org.apache.flink.table.catalog.ObjectPath;
+import org.apache.flink.table.catalog.ResolvedSchema;
+import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
 
@@ -26,6 +31,7 @@ import java.nio.file.Path;
 import java.util.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** End-to-end SQL scenario for the LanceNamespace-backed catalog. */
 class LanceNamespaceCatalogITCase {
@@ -114,6 +120,117 @@ class LanceNamespaceCatalogITCase {
     // hello and flink were re-emitted with new counts, world was not in the second batch and
     // therefore stays at its previous value.
     assertThat(counts).containsOnly(entry("hello", 1L), entry("world", 2L), entry("flink", 3L));
+  }
+
+  @Test
+  void testCreateTableAsSelectPreservesNotNull() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+
+    tableEnv.executeSql(
+        "CREATE TABLE word_count (word STRING PRIMARY KEY NOT ENFORCED, cnt BIGINT)");
+    tableEnv.executeSql("INSERT INTO word_count VALUES ('a', CAST(1 AS BIGINT))").await();
+
+    // Plain CTAS: the PK is dropped (Flink CTAS does not propagate constraints) but column
+    // nullability is preserved end-to-end through Arrow — matches Paimon parity.
+    tableEnv.executeSql("CREATE TABLE word_count_as AS SELECT * FROM word_count").await();
+
+    List<Row> rows = collectRows(tableEnv.executeSql("SELECT word, cnt FROM word_count_as"));
+    assertThat(rows).containsExactly(Row.of("a", 1L));
+
+    ResolvedSchema schema = tableEnv.from("word_count_as").getResolvedSchema();
+    assertThat(schema.getPrimaryKey()).isEmpty();
+    assertThat(nullabilityOf(schema, "word")).isFalse();
+    assertThat(nullabilityOf(schema, "cnt")).isTrue();
+  }
+
+  @Test
+  void testCreateTableAsSelectWithPrimaryKeyOption() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+
+    tableEnv.executeSql(
+        "CREATE TABLE word_count (word STRING PRIMARY KEY NOT ENFORCED, cnt BIGINT)");
+    tableEnv.executeSql("INSERT INTO word_count VALUES ('a', CAST(1 AS BIGINT))").await();
+
+    // The 'primary-key' option recovers the PK that CTAS would otherwise drop and promotes
+    // its columns to NOT NULL — Paimon-compatible recovery path.
+    tableEnv
+        .executeSql(
+            "CREATE TABLE word_count_copy WITH ('primary-key' = 'word') "
+                + "AS SELECT * FROM word_count")
+        .await();
+
+    List<Row> rows = collectRows(tableEnv.executeSql("SELECT word, cnt FROM word_count_copy"));
+    assertThat(rows).containsExactly(Row.of("a", 1L));
+
+    Catalog catalog = tableEnv.getCatalog("my_catalog").orElseThrow();
+    CatalogBaseTable copy = catalog.getTable(new ObjectPath("default", "word_count_copy"));
+    assertThat(copy.getUnresolvedSchema().getPrimaryKey().orElseThrow().getColumnNames())
+        .containsExactly("word");
+  }
+
+  @Test
+  void testCreateTableLikeRequiresExcludingOptions() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+
+    tableEnv.executeSql(
+        "CREATE TABLE word_count (word STRING PRIMARY KEY NOT ENFORCED, cnt BIGINT)");
+
+    // Paimon parity: bare LIKE forwards the catalog-synthesized 'connector' and 'path'
+    // options, which the catalog refuses on user-authored DDL.
+    assertThatThrownBy(() -> tableEnv.executeSql("CREATE TABLE word_count_like LIKE word_count"))
+        .hasStackTraceContaining(
+            "Table option 'path' is not supported when creating tables in Lance namespace catalog");
+
+    // EXCLUDING OPTIONS strips the forwarded options and the table is created.
+    tableEnv.executeSql("CREATE TABLE word_count_like LIKE word_count (EXCLUDING OPTIONS)");
+
+    Catalog catalog = tableEnv.getCatalog("my_catalog").orElseThrow();
+    CatalogBaseTable like = catalog.getTable(new ObjectPath("default", "word_count_like"));
+    assertThat(like.getUnresolvedSchema().getPrimaryKey().orElseThrow().getColumnNames())
+        .containsExactly("word");
+
+    ResolvedSchema schema = tableEnv.from("word_count_like").getResolvedSchema();
+    assertThat(nullabilityOf(schema, "word")).isFalse();
+    assertThat(nullabilityOf(schema, "cnt")).isTrue();
+  }
+
+  @Test
+  void testCreateTableRejectsUnknownOptionsButAllowsPrimaryKey() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+
+    tableEnv.executeSql(
+        "CREATE TABLE pk_only (word STRING, cnt BIGINT) WITH ('primary-key' = 'word')");
+
+    assertThatThrownBy(
+            () ->
+                tableEnv.executeSql(
+                    "CREATE TABLE bad_opts (word STRING, cnt BIGINT) "
+                        + "WITH ('primary-key' = 'word', 'write.batch-size' = '128')"))
+        .hasStackTraceContaining("Unsupported table options in Lance namespace catalog");
+
+    assertThatThrownBy(
+            () ->
+                tableEnv.executeSql(
+                    "CREATE TABLE wrong_connector (word STRING) WITH ('connector' = 'kafka')"))
+        .hasStackTraceContaining("Unsupported table options in Lance namespace catalog");
+  }
+
+  private TableEnvironment newCatalog(String name) {
+    EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
+    TableEnvironment tableEnv = TableEnvironment.create(settings);
+    tableEnv.executeSql(
+        "CREATE CATALOG "
+            + name
+            + " WITH ('type' = 'lance', 'warehouse' = "
+            + sqlString(tempDir.toUri().toString())
+            + ")");
+    tableEnv.executeSql("USE CATALOG " + name);
+    return tableEnv;
+  }
+
+  private static boolean nullabilityOf(ResolvedSchema schema, String column) {
+    LogicalType type = schema.getColumn(column).orElseThrow().getDataType().getLogicalType();
+    return type.isNullable();
   }
 
   private static Map.Entry<String, Long> entry(String key, Long value) {

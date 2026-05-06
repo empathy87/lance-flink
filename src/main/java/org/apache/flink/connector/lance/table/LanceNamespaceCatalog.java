@@ -52,7 +52,6 @@ import org.apache.flink.table.catalog.exceptions.TableNotExistException;
 import org.apache.flink.table.catalog.stats.CatalogColumnStatistics;
 import org.apache.flink.table.catalog.stats.CatalogTableStatistics;
 import org.apache.flink.table.expressions.Expression;
-import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -68,6 +67,7 @@ import java.io.Closeable;
 import java.net.URI;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -89,6 +89,7 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
   public static final String DEFAULT_DATABASE = "default";
   private static final String CONNECTOR_OPTION = "connector";
   private static final String PATH_OPTION = "path";
+  static final String PRIMARY_KEY_OPTION = "primary-key";
   static final String PRIMARY_KEY_METADATA = "flink.primary-keys";
   private static final String PRIMARY_KEY_DELIMITER = ",";
 
@@ -366,15 +367,9 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
   }
 
   private static Schema toFlinkSchema(List<String> primaryKeys, RowType rowType) {
-    Set<String> pkSet = new HashSet<>(primaryKeys);
     Schema.Builder schemaBuilder = Schema.newBuilder();
     for (RowType.RowField field : rowType.getFields()) {
-      DataType dataType = LanceTypeConverter.toDataType(field.getType());
-      // Flink requires PK columns to be NOT NULL.
-      if (pkSet.contains(field.getName())) {
-        dataType = dataType.notNull();
-      }
-      schemaBuilder.column(field.getName(), dataType);
+      schemaBuilder.column(field.getName(), LanceTypeConverter.toDataType(field.getType()));
     }
     if (!primaryKeys.isEmpty()) {
       schemaBuilder.primaryKey(primaryKeys);
@@ -417,18 +412,26 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
   }
 
   private TableSchemaSpec validateAndExtractSchemaSpec(CatalogBaseTable table) {
-    if (table.getOptions().containsKey(PATH_OPTION)) {
+    Map<String, String> options = new HashMap<>(table.getOptions());
+    List<String> optionPrimaryKeys = parsePrimaryKeyOption(options.remove(PRIMARY_KEY_OPTION));
+
+    if (options.containsKey(PATH_OPTION)) {
       throw new CatalogException(
           String.format(
               "Table option '%s' is not supported when creating tables in Lance namespace catalog. "
-                  + "Table locations are managed by the configured Lance namespace.",
+                  + "Table locations are managed by the configured Lance namespace. "
+                  + "For CREATE TABLE LIKE, use EXCLUDING OPTIONS.",
               PATH_OPTION));
     }
 
-    if (!table.getOptions().isEmpty()) {
+    if (!options.isEmpty()) {
       throw new CatalogException(
-          "Table options are not supported when creating tables in Lance namespace catalog. "
-              + "Table locations and connector options are managed by the catalog.");
+          "Unsupported table options in Lance namespace catalog: "
+              + new ArrayList<>(options.keySet())
+              + ". Only '"
+              + PRIMARY_KEY_OPTION
+              + "' is supported. "
+              + "For CREATE TABLE LIKE, use EXCLUDING OPTIONS.");
     }
 
     if (!(table instanceof ResolvedCatalogBaseTable<?> resolved)) {
@@ -456,14 +459,90 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
       throw new CatalogException("Resolved schema is not a RowType: " + logicalType);
     }
 
-    List<String> primaryKeys =
+    List<String> declaredPrimaryKeys =
         resolved
             .getResolvedSchema()
             .getPrimaryKey()
             .map(pk -> List.copyOf(pk.getColumns()))
             .orElse(Collections.emptyList());
 
+    List<String> primaryKeys = mergePrimaryKeys(declaredPrimaryKeys, optionPrimaryKeys);
+
+    if (!primaryKeys.isEmpty()) {
+      validatePrimaryKeyColumns(rowType, primaryKeys);
+      rowType = makeColumnsNotNull(rowType, primaryKeys);
+    }
+
     return new TableSchemaSpec(rowType, primaryKeys);
+  }
+
+  private static List<String> parsePrimaryKeyOption(String value) {
+    if (value == null || value.isBlank()) {
+      return Collections.emptyList();
+    }
+
+    List<String> keys =
+        Arrays.stream(value.split(PRIMARY_KEY_DELIMITER))
+            .map(String::trim)
+            .filter(s -> !s.isEmpty())
+            .toList();
+
+    Set<String> seen = new HashSet<>();
+    for (String key : keys) {
+      if (!seen.add(key)) {
+        throw new CatalogException("Duplicate primary key column: " + key);
+      }
+    }
+
+    return List.copyOf(keys);
+  }
+
+  private static List<String> mergePrimaryKeys(List<String> fromDdl, List<String> fromOption) {
+    if (fromOption.isEmpty()) {
+      return fromDdl;
+    }
+    if (fromDdl.isEmpty()) {
+      return fromOption;
+    }
+    if (!fromDdl.equals(fromOption)) {
+      throw new CatalogException(
+          "Primary key declared in DDL "
+              + fromDdl
+              + " differs from table option '"
+              + PRIMARY_KEY_OPTION
+              + "' "
+              + fromOption);
+    }
+    return fromDdl;
+  }
+
+  private static void validatePrimaryKeyColumns(RowType rowType, List<String> primaryKeys) {
+    Set<String> fields =
+        rowType.getFields().stream().map(RowType.RowField::getName).collect(Collectors.toSet());
+    for (String primaryKey : primaryKeys) {
+      if (!fields.contains(primaryKey)) {
+        throw new CatalogException(
+            "Primary key column '" + primaryKey + "' does not exist in table schema");
+      }
+    }
+  }
+
+  private static RowType makeColumnsNotNull(RowType rowType, List<String> columnNames) {
+    Set<String> notNullSet = new HashSet<>(columnNames);
+    List<RowType.RowField> fields = new ArrayList<>(rowType.getFields().size());
+    for (RowType.RowField field : rowType.getFields()) {
+      if (notNullSet.contains(field.getName()) && field.getType().isNullable()) {
+        LogicalType notNull = field.getType().copy(false);
+        fields.add(
+            field
+                .getDescription()
+                .map(desc -> new RowType.RowField(field.getName(), notNull, desc))
+                .orElseGet(() -> new RowType.RowField(field.getName(), notNull)));
+      } else {
+        fields.add(field);
+      }
+    }
+    return new RowType(rowType.isNullable(), fields);
   }
 
   private record TableSchemaSpec(RowType rowType, List<String> primaryKeys) {}
