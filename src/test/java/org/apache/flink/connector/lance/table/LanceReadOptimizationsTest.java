@@ -24,6 +24,7 @@ import org.apache.flink.table.expressions.ValueLiteralExpression;
 import org.apache.flink.table.functions.BuiltInFunctionDefinition;
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
 import org.apache.flink.table.types.DataType;
+import org.apache.flink.table.types.logical.RowType;
 
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
@@ -42,8 +43,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * <p>Test contents:
  *
  * <ul>
- *   <li>Limit push-down
- *   <li>Predicate push-down (basic comparison, IN, BETWEEN)
+ *   <li>Predicate push-down (comparisons, AND, IS NULL / IS NOT NULL)
  *   <li>Column pruning
  * </ul>
  */
@@ -71,56 +71,6 @@ public class LanceReadOptimizationsTest {
             DataTypes.FIELD("status", DataTypes.STRING()),
             DataTypes.FIELD("score", DataTypes.DOUBLE()),
             DataTypes.FIELD("created_time", DataTypes.STRING()));
-  }
-
-  // ==================== Limit Push-Down Tests ====================
-
-  @Nested
-  @DisplayName("Limit Push-Down Tests")
-  class LimitPushDownTests {
-
-    @Test
-    @DisplayName("Test applyLimit method")
-    void testApplyLimit() {
-      LanceDynamicTableSource source = new LanceDynamicTableSource(baseOptions, physicalDataType);
-
-      // Initial state should have no limit
-      assertNull(source.getLimit(), "Initial limit should be null");
-
-      // Apply limit
-      source.applyLimit(100);
-
-      // Verify limit is set
-      assertEquals(100L, source.getLimit(), "Limit should be correctly set to 100");
-    }
-
-    @Test
-    @DisplayName("Test Limit of 0")
-    void testZeroLimit() {
-      LanceDynamicTableSource source = new LanceDynamicTableSource(baseOptions, physicalDataType);
-      source.applyLimit(0);
-      assertEquals(0L, source.getLimit(), "Limit should be settable to 0");
-    }
-
-    @Test
-    @DisplayName("Test large Limit value")
-    void testLargeLimit() {
-      LanceDynamicTableSource source = new LanceDynamicTableSource(baseOptions, physicalDataType);
-      long largeLimit = Long.MAX_VALUE;
-      source.applyLimit(largeLimit);
-      assertEquals(largeLimit, source.getLimit(), "Should support large Limit values");
-    }
-
-    @Test
-    @DisplayName("Test copy preserves Limit")
-    void testCopyPreservesLimit() {
-      LanceDynamicTableSource source = new LanceDynamicTableSource(baseOptions, physicalDataType);
-      source.applyLimit(50);
-
-      LanceDynamicTableSource copied = (LanceDynamicTableSource) source.copy();
-
-      assertEquals(50L, copied.getLimit(), "copy() should preserve limit value");
-    }
   }
 
   // ==================== Predicate Push-Down Tests ====================
@@ -223,52 +173,6 @@ public class LanceReadOptimizationsTest {
     }
 
     @Test
-    @DisplayName("Test LIKE push-down")
-    void testLikePushDown() {
-      LanceDynamicTableSource source = new LanceDynamicTableSource(baseOptions, physicalDataType);
-
-      // Create name LIKE 'test%' expression
-      FieldReferenceExpression fieldRef =
-          new FieldReferenceExpression("name", DataTypes.STRING(), 0, 1);
-      ValueLiteralExpression pattern = new ValueLiteralExpression("test%");
-
-      CallExpression likeExpr =
-          CallExpression.permanent(
-              BuiltInFunctionDefinitions.LIKE,
-              Arrays.asList(fieldRef, pattern),
-              DataTypes.BOOLEAN());
-
-      SupportsFilterPushDown.Result result =
-          source.applyFilters(Collections.singletonList(likeExpr));
-
-      assertEquals(1, result.getAcceptedFilters().size(), "LIKE should be accepted");
-    }
-
-    @Test
-    @DisplayName("Test IN predicate push-down")
-    @Disabled
-    void testInPredicatePushDown() {
-      LanceDynamicTableSource source = new LanceDynamicTableSource(baseOptions, physicalDataType);
-
-      // Create status IN ('active', 'pending', 'completed') expression
-      FieldReferenceExpression fieldRef =
-          new FieldReferenceExpression("status", DataTypes.STRING(), 0, 2);
-      ValueLiteralExpression value1 = new ValueLiteralExpression("active");
-      ValueLiteralExpression value2 = new ValueLiteralExpression("pending");
-      ValueLiteralExpression value3 = new ValueLiteralExpression("completed");
-
-      CallExpression inExpr =
-          CallExpression.permanent(
-              BuiltInFunctionDefinitions.IN,
-              Arrays.asList(fieldRef, value1, value2, value3),
-              DataTypes.BOOLEAN());
-
-      SupportsFilterPushDown.Result result = source.applyFilters(Collections.singletonList(inExpr));
-
-      assertEquals(1, result.getAcceptedFilters().size(), "IN predicate should be accepted");
-    }
-
-    @Test
     @DisplayName("Test multiple independent filter conditions")
     void testMultipleFilters() {
       LanceDynamicTableSource source = new LanceDynamicTableSource(baseOptions, physicalDataType);
@@ -316,11 +220,9 @@ public class LanceReadOptimizationsTest {
     void testSingleColumnProjection() {
       LanceDynamicTableSource source = new LanceDynamicTableSource(baseOptions, physicalDataType);
 
-      // Select only id column
       int[][] projection = {{0}}; // First column
-      source.applyProjection(projection);
+      source.applyProjection(projection, projectedType(projection));
 
-      // Verify projection is applied
       assertNotNull(source, "Projection should be successfully applied");
     }
 
@@ -329,9 +231,8 @@ public class LanceReadOptimizationsTest {
     void testMultipleColumnProjection() {
       LanceDynamicTableSource source = new LanceDynamicTableSource(baseOptions, physicalDataType);
 
-      // Select id, name, score columns
       int[][] projection = {{0}, {1}, {3}};
-      source.applyProjection(projection);
+      source.applyProjection(projection, projectedType(projection));
 
       assertNotNull(source, "Multiple column projection should be successfully applied");
     }
@@ -350,7 +251,7 @@ public class LanceReadOptimizationsTest {
       LanceDynamicTableSource source = new LanceDynamicTableSource(baseOptions, physicalDataType);
 
       int[][] projection = {{0}, {2}};
-      source.applyProjection(projection);
+      source.applyProjection(projection, projectedType(projection));
 
       LanceDynamicTableSource copied = (LanceDynamicTableSource) source.copy();
 
@@ -365,98 +266,18 @@ public class LanceReadOptimizationsTest {
   class CombinedOptimizationsTests {
 
     @Test
-    @DisplayName("Test Limit + filter condition combination")
-    void testLimitWithFilter() {
+    @DisplayName("Test filter + projection combination")
+    void testFilterWithProjection() {
       LanceDynamicTableSource source = new LanceDynamicTableSource(baseOptions, physicalDataType);
 
-      // Apply filter condition
-      List<ResolvedExpression> filters = createEqualsFilter("status", "active");
-      source.applyFilters(filters);
-
-      // Apply limit
-      source.applyLimit(100L);
-
-      assertEquals(Long.valueOf(100L), source.getLimit(), "Limit should be correctly set");
-    }
-
-    @Test
-    @DisplayName("Test Limit + projection combination")
-    void testLimitWithProjection() {
-      LanceDynamicTableSource source = new LanceDynamicTableSource(baseOptions, physicalDataType);
-
-      // Apply projection
-      int[][] projection = {{0}, {1}};
-      source.applyProjection(projection);
-
-      // Apply limit
-      source.applyLimit(50L);
-
-      assertEquals(Long.valueOf(50L), source.getLimit(), "Limit should be correctly set");
-    }
-
-    @Test
-    @DisplayName("Test all optimizations combined")
-    void testAllOptimizations() {
-      LanceDynamicTableSource source = new LanceDynamicTableSource(baseOptions, physicalDataType);
-
-      // 1. Apply projection
       int[][] projection = {{0}, {1}, {3}}; // id, name, score
-      source.applyProjection(projection);
+      source.applyProjection(projection, projectedType(projection));
 
-      // 2. Apply filter condition
       List<ResolvedExpression> filters =
           createComparisonFilter("score", 60.0, BuiltInFunctionDefinitions.GREATER_THAN_OR_EQUAL);
       SupportsFilterPushDown.Result result = source.applyFilters(filters);
 
-      // 3. Apply limit
-      source.applyLimit(100L);
-
-      // Verify all optimizations are correctly applied
       assertEquals(1, result.getAcceptedFilters().size(), "Filter condition should be accepted");
-      assertEquals(Long.valueOf(100L), source.getLimit(), "Limit should be correctly set");
-    }
-  }
-
-  // ==================== LanceOptions Tests ====================
-
-  @Nested
-  @DisplayName("LanceOptions Limit Configuration Tests")
-  class LanceOptionsLimitTests {
-
-    @Test
-    @DisplayName("Test readLimit configuration")
-    void testReadLimitConfig() {
-      LanceOptions options = LanceOptions.builder().path("/test/path").readLimit(500L).build();
-
-      assertEquals(500L, options.getReadLimit(), "readLimit should be correctly configured");
-    }
-
-    @Test
-    @DisplayName("Test readLimit default value")
-    void testReadLimitDefault() {
-      LanceOptions options = LanceOptions.builder().path("/test/path").build();
-
-      assertNull(options.getReadLimit(), "readLimit default should be null");
-    }
-
-    @Test
-    @DisplayName("Test readLimit of 0")
-    void testReadLimitZero() {
-      // 0 should be allowed (means don't read any data)
-      LanceOptions options = LanceOptions.builder().path("/test/path").readLimit(0L).build();
-
-      assertEquals(0L, options.getReadLimit());
-    }
-
-    @Test
-    @DisplayName("Test negative readLimit should fail")
-    void testNegativeReadLimit() {
-      assertThrows(
-          IllegalArgumentException.class,
-          () -> {
-            LanceOptions.builder().path("/test/path").readLimit(-1L).build();
-          },
-          "Negative readLimit should throw exception");
     }
   }
 
@@ -511,5 +332,17 @@ public class LanceReadOptimizationsTest {
       default:
         return 0;
     }
+  }
+
+  /** Build the produced DataType for a top-level projection of {@code physicalDataType}. */
+  private DataType projectedType(int[][] indices) {
+    RowType rowType = (RowType) physicalDataType.getLogicalType();
+    List<DataType> children = physicalDataType.getChildren();
+    DataTypes.Field[] fields = new DataTypes.Field[indices.length];
+    for (int i = 0; i < indices.length; i++) {
+      int idx = indices[i][0];
+      fields[i] = DataTypes.FIELD(rowType.getFieldNames().get(idx), children.get(idx));
+    }
+    return DataTypes.ROW(fields);
   }
 }

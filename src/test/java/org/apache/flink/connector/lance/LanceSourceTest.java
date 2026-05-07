@@ -14,6 +14,8 @@
 package org.apache.flink.connector.lance;
 
 import org.apache.flink.connector.lance.config.LanceOptions;
+import org.apache.flink.connector.lance.source.LanceSource;
+import org.apache.flink.connector.lance.source.LanceSourceSplit;
 
 import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.BigIntType;
@@ -57,81 +59,53 @@ class LanceSourceTest {
   @Test
   @DisplayName("Test LanceSource configuration build")
   void testSourceConfiguration() {
-    LanceOptions options =
-        LanceOptions.builder()
-            .path(datasetPath)
-            .readBatchSize(512)
-            .readColumns(Arrays.asList("id", "content"))
-            .readFilter("id > 10")
-            .build();
+    LanceOptions options = LanceOptions.builder().path(datasetPath).readBatchSize(512).build();
 
-    LanceSource source = new LanceSource(options, rowType);
+    LanceSource source =
+        new LanceSource(options, rowType, Arrays.asList("id", "content"), "id > 10");
 
     assertThat(source.getOptions().getPath()).isEqualTo(datasetPath);
     assertThat(source.getOptions().getReadBatchSize()).isEqualTo(512);
-    assertThat(source.getOptions().getReadColumns()).containsExactly("id", "content");
-    assertThat(source.getOptions().getReadFilter()).isEqualTo("id > 10");
+    assertThat(source.getSelectedColumns()).containsExactly("id", "content");
+    assertThat(source.getFilter()).isEqualTo("id > 10");
     assertThat(source.getRowType()).isEqualTo(rowType);
   }
 
   @Test
-  @DisplayName("Test LanceSource Builder pattern")
-  void testSourceBuilder() {
-    LanceSource source =
-        LanceSource.builder()
-            .path(datasetPath)
-            .batchSize(256)
-            .columns(Arrays.asList("id"))
-            .filter("id < 100")
-            .rowType(rowType)
-            .build();
+  @DisplayName("Test LanceSource construction via LanceOptions")
+  void testSourceFromOptions() {
+    LanceOptions options = LanceOptions.builder().path(datasetPath).readBatchSize(256).build();
+
+    LanceSource source = new LanceSource(options, rowType, Arrays.asList("id"), "id < 100");
 
     assertThat(source.getOptions().getPath()).isEqualTo(datasetPath);
     assertThat(source.getOptions().getReadBatchSize()).isEqualTo(256);
     assertThat(source.getSelectedColumns()).containsExactly("id");
+    assertThat(source.getFilter()).isEqualTo("id < 100");
   }
 
   @Test
-  @DisplayName("Test LanceSource Builder throws exception when missing path")
-  void testSourceBuilderMissingPath() {
-    assertThatThrownBy(() -> LanceSource.builder().rowType(rowType).build())
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Dataset path cannot be empty");
+  @DisplayName("Test LanceSourceSplit creation")
+  void testLanceSourceSplit() {
+    LanceSourceSplit fragmentSplit = LanceSourceSplit.fragment(1, 7);
+    assertThat(fragmentSplit.splitId()).isEqualTo("v1-frag-7");
+    assertThat(fragmentSplit.datasetVersion()).isEqualTo(1L);
+    assertThat(fragmentSplit.fragmentId()).isEqualTo(7);
+    assertThat(fragmentSplit.recordsToSkip()).isZero();
   }
 
   @Test
-  @DisplayName("Test LanceSplit creation")
-  void testLanceSplit() {
-    LanceSplit split = new LanceSplit(0, 1, datasetPath, 1000);
+  @DisplayName("Test LanceSourceSplit equality and resume")
+  void testLanceSourceSplitEquality() {
+    LanceSourceSplit a = LanceSourceSplit.fragment(1, 1);
+    LanceSourceSplit b = LanceSourceSplit.fragment(1, 1);
+    LanceSourceSplit c = LanceSourceSplit.fragment(1, 2);
 
-    assertThat(split.getSplitNumber()).isEqualTo(0);
-    assertThat(split.getFragmentId()).isEqualTo(1);
-    assertThat(split.getDatasetPath()).isEqualTo(datasetPath);
-    assertThat(split.getRowCount()).isEqualTo(1000);
-  }
-
-  @Test
-  @DisplayName("Test LanceSplit equality")
-  void testLanceSplitEquality() {
-    LanceSplit split1 = new LanceSplit(0, 1, datasetPath, 1000);
-    LanceSplit split2 = new LanceSplit(0, 1, datasetPath, 1000);
-    LanceSplit split3 = new LanceSplit(1, 2, datasetPath, 2000);
-
-    assertThat(split1).isEqualTo(split2);
-    assertThat(split1.hashCode()).isEqualTo(split2.hashCode());
-    assertThat(split1).isNotEqualTo(split3);
-  }
-
-  @Test
-  @DisplayName("Test LanceInputFormat configuration")
-  void testInputFormatConfiguration() {
-    LanceOptions options = LanceOptions.builder().path(datasetPath).readBatchSize(128).build();
-
-    LanceInputFormat inputFormat = new LanceInputFormat(options, rowType);
-
-    assertThat(inputFormat.getOptions().getPath()).isEqualTo(datasetPath);
-    assertThat(inputFormat.getOptions().getReadBatchSize()).isEqualTo(128);
-    assertThat(inputFormat.getRowType()).isEqualTo(rowType);
+    assertThat(a).isEqualTo(b);
+    assertThat(a.hashCode()).isEqualTo(b.hashCode());
+    assertThat(a).isNotEqualTo(c);
+    assertThat(a.withRecordsToSkip(10)).isNotEqualTo(a);
+    assertThat(a.withRecordsToSkip(10).recordsToSkip()).isEqualTo(10);
   }
 
   @Test
@@ -139,10 +113,11 @@ class LanceSourceTest {
   void testDefaultConfiguration() {
     LanceOptions options = LanceOptions.builder().path(datasetPath).build();
 
-    // Verify default values
     assertThat(options.getReadBatchSize()).isEqualTo(1024);
-    assertThat(options.getReadColumns()).isEmpty();
-    assertThat(options.getReadFilter()).isNull();
+
+    LanceSource source = new LanceSource(options, rowType);
+    assertThat(source.getSelectedColumns()).isNull();
+    assertThat(source.getFilter()).isNull();
   }
 
   @Test

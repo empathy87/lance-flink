@@ -263,28 +263,14 @@ DROP CATALOG IF EXISTS lance_catalog;
 --
 -- Read configuration:
 --   read.batch-size     = 1024           -- Read batch size
---   read.columns        = 'col1,col2'    -- Columns to read (comma separated)
---   read.filter         = 'id > 10'      -- Filter condition
+--   (column projection comes from SELECT, filters from WHERE — both pushed into Lance)
 --
 -- Write configuration:
 --   write.batch-size    = 1024           -- Write batch size
 --   write.max-rows-per-file = 1000000    -- Max rows per file
 --
--- Index configuration:
---   index.type          = 'IVF_PQ'       -- Index type: IVF_PQ/IVF_HNSW/IVF_FLAT
---   index.column        = 'embedding'    -- Index column name
---   index.num-partitions = 256           -- IVF partition count
---   index.num-sub-vectors = 16           -- PQ sub-vector count
---   index.num-bits      = 8              -- Quantization bits
---   index.max-level     = 7              -- HNSW max level
---   index.m             = 16             -- HNSW connection count
---   index.ef-construction = 100          -- HNSW construction ef parameter
---
--- Vector search configuration:
---   vector.column       = 'embedding'    -- Vector column name
---   vector.metric       = 'L2'           -- Distance metric: L2/COSINE/DOT
---   vector.nprobes      = 20             -- Search probe count
---   vector.ef           = 100            -- HNSW search ef parameter
---   vector.refine-factor = null          -- Refine factor
+-- Indexing and vector search are not configured via table options. Use
+-- LanceIndexBuilder and LanceVectorSearch (or the LANCE_VECTOR_SEARCH UDF, which
+-- takes path/column/metric directly as arguments) instead.
 --
 -- ================================================================================

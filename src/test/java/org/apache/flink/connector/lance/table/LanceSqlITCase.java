@@ -75,16 +75,19 @@ class LanceSqlITCase {
     factory.optionalOptions().forEach(opt -> optionalOptionKeys.add(opt.key()));
 
     assertThat(optionalOptionKeys)
-        .contains(
-            "read.batch-size",
+        .containsExactlyInAnyOrder(
+            "read.batch-size", "write.batch-size", "write.max-rows-per-file");
+    assertThat(optionalOptionKeys)
+        .doesNotContain(
             "read.columns",
             "read.filter",
-            "write.batch-size",
-            "write.max-rows-per-file",
             "index.type",
             "index.column",
+            "index.num-partitions",
+            "index.num-sub-vectors",
             "vector.column",
-            "vector.metric");
+            "vector.metric",
+            "vector.nprobes");
   }
 
   @Test
@@ -191,10 +194,9 @@ class LanceSqlITCase {
     assertThat(LanceDynamicTableFactory.READ_BATCH_SIZE.key()).isEqualTo("read.batch-size");
     assertThat(LanceDynamicTableFactory.READ_BATCH_SIZE.defaultValue()).isEqualTo(1024);
     assertThat(LanceDynamicTableFactory.WRITE_BATCH_SIZE.key()).isEqualTo("write.batch-size");
-    assertThat(LanceDynamicTableFactory.INDEX_TYPE.key()).isEqualTo("index.type");
-    assertThat(LanceDynamicTableFactory.INDEX_TYPE.defaultValue()).isEqualTo("IVF_PQ");
-    assertThat(LanceDynamicTableFactory.VECTOR_METRIC.key()).isEqualTo("vector.metric");
-    assertThat(LanceDynamicTableFactory.VECTOR_METRIC.defaultValue()).isEqualTo("L2");
+    assertThat(LanceDynamicTableFactory.WRITE_BATCH_SIZE.defaultValue()).isEqualTo(1024);
+    assertThat(LanceDynamicTableFactory.WRITE_MAX_ROWS_PER_FILE.key())
+        .isEqualTo("write.max-rows-per-file");
   }
 
   @Test

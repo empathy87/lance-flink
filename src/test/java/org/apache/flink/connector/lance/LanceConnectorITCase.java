@@ -19,6 +19,9 @@ import org.apache.flink.connector.lance.config.LanceOptions.MetricType;
 import org.apache.flink.connector.lance.converter.LanceTypeConverter;
 import org.apache.flink.connector.lance.converter.RowDataConverter;
 import org.apache.flink.connector.lance.sink.LanceSinkV2;
+import org.apache.flink.connector.lance.source.LanceSource;
+import org.apache.flink.connector.lance.source.LanceSourceSplit;
+import org.apache.flink.connector.lance.source.LanceSourceSplitSerializer;
 import org.apache.flink.connector.lance.table.LanceDynamicTableFactory;
 import org.apache.flink.connector.lance.table.LanceDynamicTableSink;
 import org.apache.flink.connector.lance.table.LanceDynamicTableSource;
@@ -85,8 +88,6 @@ class LanceConnectorITCase {
             .path(datasetPath)
             // Source configuration
             .readBatchSize(512)
-            .readColumns(Arrays.asList("id", "content", "embedding"))
-            .readFilter("id > 0")
             // Sink configuration
             .writeBatchSize(256)
             .writeMaxRowsPerFile(100000)
@@ -109,8 +110,6 @@ class LanceConnectorITCase {
     // Verify all configurations
     assertThat(options.getPath()).isEqualTo(datasetPath);
     assertThat(options.getReadBatchSize()).isEqualTo(512);
-    assertThat(options.getReadColumns()).containsExactly("id", "content", "embedding");
-    assertThat(options.getReadFilter()).isEqualTo("id > 0");
     assertThat(options.getWriteBatchSize()).isEqualTo(256);
     assertThat(options.getWriteMaxRowsPerFile()).isEqualTo(100000);
     assertThat(options.getIndexType()).isEqualTo(IndexType.IVF_PQ);
@@ -155,16 +154,12 @@ class LanceConnectorITCase {
   }
 
   @Test
-  @DisplayName("Test LanceSource builder pattern")
-  void testLanceSourceBuilder() {
+  @DisplayName("Test LanceSource construction via LanceOptions")
+  void testLanceSourceFromOptions() {
+    LanceOptions options = LanceOptions.builder().path(datasetPath).readBatchSize(256).build();
+
     LanceSource source =
-        LanceSource.builder()
-            .path(datasetPath)
-            .batchSize(256)
-            .columns(Arrays.asList("id", "embedding"))
-            .filter("id < 1000")
-            .rowType(rowType)
-            .build();
+        new LanceSource(options, rowType, Arrays.asList("id", "embedding"), "id < 1000");
 
     assertThat(source.getOptions().getPath()).isEqualTo(datasetPath);
     assertThat(source.getOptions().getReadBatchSize()).isEqualTo(256);
@@ -291,22 +286,16 @@ class LanceConnectorITCase {
   }
 
   @Test
-  @DisplayName("Test LanceSplit serialization compatibility")
-  void testLanceSplitSerialization() {
-    LanceSplit split1 = new LanceSplit(0, 1, datasetPath, 10000);
-    LanceSplit split2 = new LanceSplit(0, 1, datasetPath, 10000);
-    LanceSplit split3 = new LanceSplit(1, 2, datasetPath, 20000);
+  @DisplayName("Test LanceSourceSplit serialization round-trip")
+  void testLanceSourceSplitSerialization() throws Exception {
+    LanceSourceSplit fragSplit = LanceSourceSplit.fragment(1, 3).withRecordsToSkip(42);
 
-    // Equality test
-    assertThat(split1).isEqualTo(split2);
-    assertThat(split1.hashCode()).isEqualTo(split2.hashCode());
-    assertThat(split1).isNotEqualTo(split3);
+    LanceSourceSplitSerializer ser = LanceSourceSplitSerializer.INSTANCE;
+    LanceSourceSplit roundTrippedFrag = ser.deserialize(ser.getVersion(), ser.serialize(fragSplit));
 
-    // toString test
-    String str = split1.toString();
-    assertThat(str).contains("LanceSplit");
-    assertThat(str).contains("fragmentId=1");
-    assertThat(str).contains("rowCount=10000");
+    assertThat(roundTrippedFrag).isEqualTo(fragSplit);
+    assertThat(fragSplit.splitId()).isEqualTo("v1-frag-3");
+    assertThat(fragSplit.toString()).contains("recordsToSkip=42");
   }
 
   @Test
