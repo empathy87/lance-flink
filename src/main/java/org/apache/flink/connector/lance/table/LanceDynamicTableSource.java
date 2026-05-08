@@ -15,12 +15,14 @@ package org.apache.flink.connector.lance.table;
 
 import org.apache.flink.connector.lance.config.LanceOptions;
 import org.apache.flink.connector.lance.source.LanceSource;
+import org.apache.flink.connector.lance.source.scan.LanceScanOptions;
 
 import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.ScanTableSource;
 import org.apache.flink.table.connector.source.SourceProvider;
 import org.apache.flink.table.connector.source.abilities.SupportsFilterPushDown;
+import org.apache.flink.table.connector.source.abilities.SupportsLimitPushDown;
 import org.apache.flink.table.connector.source.abilities.SupportsProjectionPushDown;
 import org.apache.flink.table.expressions.ResolvedExpression;
 import org.apache.flink.table.types.DataType;
@@ -31,28 +33,40 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
-/** Lance dynamic table source with projection and filter pushdown. */
-// TODO: Add SupportsLimitPushDown once global limit handling is implemented in the runtime source.
-// TODO: Add aggregate pushdown with a dedicated LanceAggregateExpressionConverter and runtime path.
+/** Dynamic table source for Lance scans. */
+// TODO: Add aggregate pushdown when Lance aggregate conversion and runtime support are ready.
 public class LanceDynamicTableSource
-    implements ScanTableSource, SupportsProjectionPushDown, SupportsFilterPushDown {
+    implements ScanTableSource,
+        SupportsProjectionPushDown,
+        SupportsFilterPushDown,
+        SupportsLimitPushDown {
 
   private final LanceOptions options;
+  private final LanceScanOptions scanOptions;
   private final DataType physicalDataType;
   private int[] projectedFieldIndices;
   private DataType producedDataType;
   private String pushedFilter;
+  private Long pushedLimit;
 
   public LanceDynamicTableSource(LanceOptions options, DataType physicalDataType) {
+    this(options, LanceScanOptions.latest(), physicalDataType);
+  }
+
+  public LanceDynamicTableSource(
+      LanceOptions options, LanceScanOptions scanOptions, DataType physicalDataType) {
     this.options = options;
+    this.scanOptions = scanOptions == null ? LanceScanOptions.latest() : scanOptions;
     this.physicalDataType = physicalDataType;
     this.projectedFieldIndices = null;
     this.producedDataType = physicalDataType;
     this.pushedFilter = null;
+    this.pushedLimit = null;
   }
 
   private LanceDynamicTableSource(LanceDynamicTableSource source) {
     this.options = source.options;
+    this.scanOptions = source.scanOptions;
     this.physicalDataType = source.physicalDataType;
     this.projectedFieldIndices =
         source.projectedFieldIndices == null
@@ -60,6 +74,7 @@ public class LanceDynamicTableSource
             : Arrays.copyOf(source.projectedFieldIndices, source.projectedFieldIndices.length);
     this.producedDataType = source.producedDataType;
     this.pushedFilter = source.pushedFilter;
+    this.pushedLimit = source.pushedLimit;
   }
 
   @Override
@@ -81,7 +96,8 @@ public class LanceDynamicTableSource
     }
 
     return SourceProvider.of(
-        new LanceSource(options, outputRowType, projectedColumnNames, pushedFilter));
+        new LanceSource(
+            options, outputRowType, projectedColumnNames, pushedFilter, scanOptions, pushedLimit));
   }
 
   @Override
@@ -135,8 +151,17 @@ public class LanceDynamicTableSource
     return Result.of(acceptedFilters, remainingFilters);
   }
 
+  @Override
+  public void applyLimit(long limit) {
+    this.pushedLimit = limit;
+  }
+
   public LanceOptions getOptions() {
     return options;
+  }
+
+  public LanceScanOptions getScanOptions() {
+    return scanOptions;
   }
 
   public DataType getPhysicalDataType() {

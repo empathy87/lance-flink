@@ -14,6 +14,7 @@
 package org.apache.flink.connector.lance.table;
 
 import org.apache.flink.connector.lance.config.LanceOptions;
+import org.apache.flink.connector.lance.source.scan.LanceScanOptions;
 
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
@@ -26,6 +27,7 @@ import org.apache.flink.table.factories.DynamicTableSinkFactory;
 import org.apache.flink.table.factories.DynamicTableSourceFactory;
 import org.apache.flink.table.factories.FactoryUtil;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -70,10 +72,14 @@ public class LanceDynamicTableFactory
   }
 
   @Override
-  // TODO: Reintroduce advanced scan options only if they do not conflict with planner pushdown.
   // TODO: Add index/vector options back when index creation or vector search is supported.
   public Set<ConfigOption<?>> optionalOptions() {
-    return Set.of(READ_BATCH_SIZE, WRITE_BATCH_SIZE, WRITE_MAX_ROWS_PER_FILE);
+    Set<ConfigOption<?>> options = new HashSet<>();
+    options.add(READ_BATCH_SIZE);
+    options.add(WRITE_BATCH_SIZE);
+    options.add(WRITE_MAX_ROWS_PER_FILE);
+    options.addAll(LanceScanOptions.ALL_OPTIONS);
+    return Set.copyOf(options);
   }
 
   @Override
@@ -83,9 +89,20 @@ public class LanceDynamicTableFactory
 
     ReadableConfig config = helper.getOptions();
     LanceOptions options = buildLanceOptions(config);
+    LanceScanOptions scanOptions = buildScanOptions(config);
 
     return new LanceDynamicTableSource(
-        options, context.getCatalogTable().getResolvedSchema().toPhysicalRowDataType());
+        options,
+        scanOptions,
+        context.getCatalogTable().getResolvedSchema().toPhysicalRowDataType());
+  }
+
+  private static LanceScanOptions buildScanOptions(ReadableConfig config) {
+    try {
+      return LanceScanOptions.fromConfig(config);
+    } catch (IllegalArgumentException e) {
+      throw new ValidationException("Invalid Lance scan options: " + e.getMessage(), e);
+    }
   }
 
   @Override
@@ -94,10 +111,20 @@ public class LanceDynamicTableFactory
     helper.validate();
 
     ReadableConfig config = helper.getOptions();
+    rejectScanOptionsForSink(config);
     LanceOptions options = buildLanceOptions(config);
     ResolvedSchema schema = context.getCatalogTable().getResolvedSchema();
 
     return new LanceDynamicTableSink(options, schema.toPhysicalRowDataType(), primaryKeys(schema));
+  }
+
+  private static void rejectScanOptionsForSink(ReadableConfig config) {
+    for (ConfigOption<?> option : LanceScanOptions.ALL_OPTIONS) {
+      if (config.getOptional(option).isPresent()) {
+        throw new ValidationException(
+            "Lance scan option '" + option.key() + "' is only supported for reads.");
+      }
+    }
   }
 
   private static List<String> primaryKeys(ResolvedSchema schema) {

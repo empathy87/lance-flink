@@ -24,6 +24,7 @@ import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
@@ -387,6 +388,24 @@ class LanceSinkV2SqlITCase {
 
     // 10 seeded + 1 new (id=100) - 1 deleted (id=1) = 10
     assertThat(rowCount(datasetUri)).isEqualTo(10L);
+  }
+
+  @Test
+  void testScanOptionsRejectedOnSink() throws Exception {
+    String datasetUri = tempDir.resolve("ds-scan-on-sink").toUri().toString();
+    EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
+    TableEnvironment tableEnv = TableEnvironment.create(settings);
+    tableEnv.executeSql(
+        "CREATE TABLE t (id BIGINT, name STRING) WITH ("
+            + "'connector' = 'lance', "
+            + "'path' = "
+            + sql(datasetUri)
+            + ", 'scan.version' = '1')");
+
+    assertThat(catchThrowable(() -> tableEnv.executeSql("INSERT INTO t VALUES (1, 'a')")))
+        .isInstanceOf(ValidationException.class)
+        .rootCause()
+        .hasMessageContaining("Lance scan option 'scan.version' is only supported for reads");
   }
 
   private static void seedDatasetForUpsert(LanceOptions options, RowType rowType, int rowCount)

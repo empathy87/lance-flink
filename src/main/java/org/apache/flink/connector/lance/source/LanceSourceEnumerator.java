@@ -16,9 +16,12 @@ package org.apache.flink.connector.lance.source;
 import org.apache.flink.connector.lance.config.LanceOptions;
 import org.apache.flink.connector.lance.source.assigner.SimpleSplitAssigner;
 import org.apache.flink.connector.lance.source.assigner.SplitAssigner;
+import org.apache.flink.connector.lance.source.scan.LanceScanOptions;
+import org.apache.flink.connector.lance.source.scan.LanceScanVersionResolver;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
+import org.lance.ReadOptions;
 
 import org.apache.flink.api.connector.source.SplitEnumerator;
 import org.apache.flink.api.connector.source.SplitEnumeratorContext;
@@ -30,7 +33,12 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 
 /** Discovers Lance fragments and assigns one split per fragment. */
 public class LanceSourceEnumerator
@@ -40,28 +48,46 @@ public class LanceSourceEnumerator
 
   private final SplitEnumeratorContext<LanceSourceSplit> context;
   private final LanceOptions options;
+  private final LanceScanOptions scanOptions;
   private final SplitAssigner assigner;
   private final boolean restored;
 
   public LanceSourceEnumerator(
       SplitEnumeratorContext<LanceSourceSplit> context, LanceOptions options) {
-    this(context, options, Collections.emptyList(), false);
+    this(context, options, LanceScanOptions.latest(), Collections.emptyList(), false);
+  }
+
+  public LanceSourceEnumerator(
+      SplitEnumeratorContext<LanceSourceSplit> context,
+      LanceOptions options,
+      LanceScanOptions scanOptions) {
+    this(context, options, scanOptions, Collections.emptyList(), false);
   }
 
   public LanceSourceEnumerator(
       SplitEnumeratorContext<LanceSourceSplit> context,
       LanceOptions options,
       Collection<LanceSourceSplit> remainingSplits) {
-    this(context, options, remainingSplits, true);
+    this(context, options, LanceScanOptions.latest(), remainingSplits, true);
+  }
+
+  public LanceSourceEnumerator(
+      SplitEnumeratorContext<LanceSourceSplit> context,
+      LanceOptions options,
+      LanceScanOptions scanOptions,
+      Collection<LanceSourceSplit> remainingSplits) {
+    this(context, options, scanOptions, remainingSplits, true);
   }
 
   private LanceSourceEnumerator(
       SplitEnumeratorContext<LanceSourceSplit> context,
       LanceOptions options,
+      LanceScanOptions scanOptions,
       Collection<LanceSourceSplit> remainingSplits,
       boolean restored) {
     this.context = Objects.requireNonNull(context, "context");
     this.options = Objects.requireNonNull(options, "options");
+    this.scanOptions = scanOptions == null ? LanceScanOptions.latest() : scanOptions;
     this.assigner =
         new SimpleSplitAssigner(Objects.requireNonNull(remainingSplits, "remainingSplits"));
     this.restored = restored;
@@ -114,17 +140,41 @@ public class LanceSourceEnumerator
     if (path == null || path.isBlank()) {
       throw new IllegalArgumentException("Lance dataset path cannot be empty");
     }
-    // TODO: Use Lance fragment statistics for safe filter-based split pruning.
+
     List<LanceSourceSplit> splits = new ArrayList<>();
     try (BufferAllocator alloc = new RootAllocator(Long.MAX_VALUE);
-        Dataset ds = Dataset.open().allocator(alloc).uri(path).build()) {
-      long datasetVersion = ds.version();
-      for (Fragment frag : ds.getFragments()) {
-        splits.add(LanceSourceSplit.fragment(datasetVersion, frag.getId()));
+        Dataset latest = openDataset(path, alloc, null)) {
+      long resolvedVersion = LanceScanVersionResolver.resolveVersion(scanOptions, latest);
+
+      if (resolvedVersion == latest.version()) {
+        addFragments(latest, resolvedVersion, splits);
+      } else {
+        try (Dataset versioned = openDataset(path, alloc, resolvedVersion)) {
+          addFragments(versioned, resolvedVersion, splits);
+        }
       }
     } catch (Exception e) {
-      throw new RuntimeException("Failed to enumerate Lance fragments at " + path, e);
+      throw new RuntimeException(
+          "Failed to enumerate Lance fragments at " + path + " with " + scanOptions, e);
     }
+
     return splits;
+  }
+
+  private static Dataset openDataset(
+      String path, BufferAllocator allocator, @Nullable Long version) {
+    if (version == null) {
+      return Dataset.open().allocator(allocator).uri(path).build();
+    }
+
+    ReadOptions readOptions = new ReadOptions.Builder().setVersion(version).build();
+    return Dataset.open().readOptions(readOptions).allocator(allocator).uri(path).build();
+  }
+
+  private static void addFragments(
+      Dataset dataset, long datasetVersion, List<LanceSourceSplit> splits) {
+    for (Fragment frag : dataset.getFragments()) {
+      splits.add(LanceSourceSplit.fragment(datasetVersion, frag.getId()));
+    }
   }
 }

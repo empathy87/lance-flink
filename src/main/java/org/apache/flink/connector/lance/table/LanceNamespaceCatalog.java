@@ -14,8 +14,11 @@
 package org.apache.flink.connector.lance.table;
 
 import org.apache.flink.connector.lance.converter.LanceTypeConverter;
+import org.apache.flink.connector.lance.source.scan.LanceScanOptions;
+import org.apache.flink.connector.lance.source.scan.LanceScanVersionResolver;
 
 import org.lance.Dataset;
+import org.lance.ReadOptions;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.CreateNamespaceRequest;
 import org.lance.namespace.model.CreateTableRequest;
@@ -62,6 +65,8 @@ import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
+
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.net.URI;
@@ -81,7 +86,7 @@ import java.util.stream.Collectors;
 import static java.util.Collections.singletonList;
 import static org.apache.flink.connector.lance.converter.LanceTypeConverter.toArrowSchema;
 
-/** Catalog for lance. */
+/** Catalog backed by a Lance namespace. */
 public class LanceNamespaceCatalog extends AbstractCatalog {
 
   private static final Logger LOG = LoggerFactory.getLogger(LanceNamespaceCatalog.class);
@@ -323,6 +328,78 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
   @Override
   public CatalogBaseTable getTable(ObjectPath tablePath)
       throws TableNotExistException, CatalogException {
+    String datasetPath = resolveDatasetPath(tablePath);
+    return loadTable(tablePath, datasetPath, Collections.emptyMap(), null);
+  }
+
+  @Override
+  public CatalogBaseTable getTable(ObjectPath tablePath, long timestamp)
+      throws TableNotExistException, CatalogException {
+    String datasetPath = resolveDatasetPath(tablePath);
+    long resolvedVersion = resolveVersionForTimestamp(tablePath, datasetPath, timestamp);
+
+    return loadTable(
+        tablePath,
+        datasetPath,
+        Collections.singletonMap(
+            LanceScanOptions.SCAN_VERSION.key(), Long.toString(resolvedVersion)),
+        resolvedVersion);
+  }
+
+  private long resolveVersionForTimestamp(
+      ObjectPath tablePath, String datasetPath, long timestamp) {
+    try (Dataset dataset = openDataset(datasetPath, null)) {
+      return LanceScanVersionResolver.resolveVersion(
+          LanceScanOptions.timestampMillis(timestamp), dataset);
+    } catch (IllegalArgumentException e) {
+      throw new CatalogException(
+          "Cannot time-travel to timestamp "
+              + timestamp
+              + " on table "
+              + tablePath
+              + ": "
+              + e.getMessage(),
+          e);
+    } catch (RuntimeException e) {
+      throw new CatalogException(
+          "Failed to open Lance dataset for time travel: " + tablePath + " at " + datasetPath, e);
+    }
+  }
+
+  private CatalogBaseTable loadTable(
+      ObjectPath tablePath,
+      String datasetPath,
+      Map<String, String> extraOptions,
+      @Nullable Long schemaVersion)
+      throws CatalogException {
+    RowType rowType;
+    List<String> primaryKeys;
+    try (Dataset dataset = openDataset(datasetPath, schemaVersion)) {
+      org.apache.arrow.vector.types.pojo.Schema arrowSchema = dataset.getSchema();
+      rowType = LanceTypeConverter.toFlinkRowType(arrowSchema);
+      primaryKeys = readPrimaryKeysFromMetadata(arrowSchema.getCustomMetadata());
+      validatePrimaryKeysExist(rowType, primaryKeys);
+    } catch (Exception e) {
+      String versionHint = schemaVersion == null ? "latest version" : "version " + schemaVersion;
+      throw new CatalogException(
+          "Failed to load Lance dataset "
+              + versionHint
+              + " for table: "
+              + tablePath
+              + " at location: "
+              + datasetPath,
+          e);
+    }
+
+    Schema schema = toFlinkSchema(primaryKeys, rowType);
+
+    Map<String, String> options = buildTableOptions(datasetPath);
+    options.putAll(extraOptions);
+    return CatalogTable.of(schema, "", Collections.emptyList(), options);
+  }
+
+  private String resolveDatasetPath(ObjectPath tablePath)
+      throws TableNotExistException, CatalogException {
     DescribeTableResponse response;
     try {
       response = namespace.describeTable(new DescribeTableRequest().id(tableId(tablePath)));
@@ -339,24 +416,15 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
           "Lance namespace returned an empty table location for table: " + tablePath);
     }
 
-    String datasetPath = normalizeDatasetPath(location);
+    return normalizeDatasetPath(location);
+  }
 
-    RowType rowType;
-    List<String> primaryKeys;
-    try (Dataset dataset = Dataset.open().allocator(allocator).uri(datasetPath).build()) {
-      org.apache.arrow.vector.types.pojo.Schema arrowSchema = dataset.getSchema();
-      rowType = LanceTypeConverter.toFlinkRowType(arrowSchema);
-      primaryKeys = readPrimaryKeysFromMetadata(arrowSchema.getCustomMetadata());
-      validatePrimaryKeysExist(rowType, primaryKeys);
-    } catch (Exception e) {
-      throw new CatalogException(
-          "Failed to load Lance dataset for table: " + tablePath + " at location: " + datasetPath,
-          e);
+  private Dataset openDataset(String datasetPath, @Nullable Long version) {
+    if (version == null) {
+      return Dataset.open().allocator(allocator).uri(datasetPath).build();
     }
-
-    Schema schema = toFlinkSchema(primaryKeys, rowType);
-
-    return CatalogTable.of(schema, "", Collections.emptyList(), buildTableOptions(datasetPath));
+    ReadOptions readOptions = new ReadOptions.Builder().setVersion(version).build();
+    return Dataset.open().readOptions(readOptions).allocator(allocator).uri(datasetPath).build();
   }
 
   private static Map<String, String> buildTableOptions(String datasetPath) {
@@ -552,7 +620,7 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
     if (primaryKeys.isEmpty()) {
       return arrowSchema;
     }
-    // TODO: change to native primary key, or at least convert to json to support strange names.
+    // TODO: Replace comma-separated primary-key metadata with native Lance keys or JSON encoding.
     Map<String, String> metadata = new HashMap<>(arrowSchema.getCustomMetadata());
     metadata.put(PRIMARY_KEY_METADATA, String.join(PRIMARY_KEY_DELIMITER, primaryKeys));
     return new org.apache.arrow.vector.types.pojo.Schema(arrowSchema.getFields(), metadata);
@@ -782,8 +850,6 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
       throws CatalogException {
     throw new CatalogException("Lance namespace catalog does not support updating statistics");
   }
-
-  // ==================== Internals ====================
 
   private void createDatabaseIfMissing(String database) {
     if (databaseExists(database)) {

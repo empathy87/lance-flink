@@ -14,6 +14,7 @@
 package org.apache.flink.connector.lance.source;
 
 import org.apache.flink.connector.lance.config.LanceOptions;
+import org.apache.flink.connector.lance.source.scan.LanceScanOptions;
 
 import org.apache.flink.api.connector.source.Boundedness;
 import org.apache.flink.api.connector.source.Source;
@@ -40,9 +41,11 @@ public class LanceSource implements Source<RowData, LanceSourceSplit, LanceSourc
   private final RowType rowType;
   private final String[] selectedColumns;
   private final String filter;
+  private final LanceScanOptions scanOptions;
+  private final Long limit;
 
   public LanceSource(LanceOptions options, RowType rowType) {
-    this(options, rowType, null, null);
+    this(options, rowType, null, null, LanceScanOptions.latest(), null);
   }
 
   public LanceSource(
@@ -50,10 +53,22 @@ public class LanceSource implements Source<RowData, LanceSourceSplit, LanceSourc
       RowType rowType,
       @Nullable List<String> selectedColumns,
       @Nullable String filter) {
+    this(options, rowType, selectedColumns, filter, LanceScanOptions.latest(), null);
+  }
+
+  public LanceSource(
+      LanceOptions options,
+      RowType rowType,
+      @Nullable List<String> selectedColumns,
+      @Nullable String filter,
+      LanceScanOptions scanOptions,
+      @Nullable Long limit) {
     this.options = Objects.requireNonNull(options, "options");
     this.rowType = Objects.requireNonNull(rowType, "rowType");
     this.selectedColumns = selectedColumns == null ? null : selectedColumns.toArray(new String[0]);
     this.filter = filter == null || filter.isBlank() ? null : filter.trim();
+    this.scanOptions = scanOptions == null ? LanceScanOptions.latest() : scanOptions;
+    this.limit = limit;
   }
 
   @Override
@@ -64,19 +79,21 @@ public class LanceSource implements Source<RowData, LanceSourceSplit, LanceSourc
   @Override
   public SourceReader<RowData, LanceSourceSplit> createReader(SourceReaderContext readerContext) {
     return new LanceSourceReader(
-        readerContext, () -> new LanceSourceSplitReader(options, rowType, selectedColumns, filter));
+        readerContext,
+        () -> new LanceSourceSplitReader(options, rowType, selectedColumns, filter, limit));
   }
 
   @Override
   public SplitEnumerator<LanceSourceSplit, LanceSourceEnumState> createEnumerator(
       SplitEnumeratorContext<LanceSourceSplit> enumContext) {
-    return new LanceSourceEnumerator(enumContext, options);
+    return new LanceSourceEnumerator(enumContext, options, scanOptions);
   }
 
   @Override
   public SplitEnumerator<LanceSourceSplit, LanceSourceEnumState> restoreEnumerator(
       SplitEnumeratorContext<LanceSourceSplit> enumContext, LanceSourceEnumState checkpoint) {
-    return new LanceSourceEnumerator(enumContext, options, checkpoint.remainingSplits());
+    return new LanceSourceEnumerator(
+        enumContext, options, scanOptions, checkpoint.remainingSplits());
   }
 
   @Override
@@ -103,5 +120,13 @@ public class LanceSource implements Source<RowData, LanceSourceSplit, LanceSourc
 
   public String getFilter() {
     return filter;
+  }
+
+  public LanceScanOptions getScanOptions() {
+    return scanOptions;
+  }
+
+  public Long getLimit() {
+    return limit;
   }
 }

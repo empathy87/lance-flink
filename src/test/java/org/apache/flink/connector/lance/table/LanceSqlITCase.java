@@ -76,7 +76,14 @@ class LanceSqlITCase {
 
     assertThat(optionalOptionKeys)
         .containsExactlyInAnyOrder(
-            "read.batch-size", "write.batch-size", "write.max-rows-per-file");
+            "read.batch-size",
+            "write.batch-size",
+            "write.max-rows-per-file",
+            "scan.version",
+            "scan.snapshot-id",
+            "scan.tag-name",
+            "scan.timestamp-millis",
+            "scan.timestamp");
     assertThat(optionalOptionKeys)
         .doesNotContain(
             "read.columns",

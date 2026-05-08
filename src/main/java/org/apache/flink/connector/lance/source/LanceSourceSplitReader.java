@@ -41,7 +41,11 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
-import java.util.*;
+import java.util.ArrayDeque;
+import java.util.Arrays;
+import java.util.Deque;
+import java.util.List;
+import java.util.Objects;
 
 /** Split reader that scans Lance fragments and resumes from recordsToSkip on restore. */
 class LanceSourceSplitReader implements SplitReader<RowData, LanceSourceSplit> {
@@ -52,6 +56,7 @@ class LanceSourceSplitReader implements SplitReader<RowData, LanceSourceSplit> {
   private final RowType configuredRowType;
   private final String[] selectedColumns;
   private final String filter;
+  private final Long limit;
 
   private final Deque<LanceSourceSplit> pendingSplits = new ArrayDeque<>();
   private final BufferAllocator allocator;
@@ -63,17 +68,22 @@ class LanceSourceSplitReader implements SplitReader<RowData, LanceSourceSplit> {
   private ArrowReader currentReader;
   private long consumedFromSplit;
   private long openedDatasetVersion = -1L;
+  // Rows emitted by this reader; used to shrink per-fragment scan limits after limit pushdown.
+  // TODO: Add tests for LIMIT pushdown with parallelism > 1 and restore.
+  private long emitted;
 
   LanceSourceSplitReader(
       LanceOptions options,
       RowType rowType,
       @Nullable String[] selectedColumns,
-      @Nullable String filter) {
+      @Nullable String filter,
+      @Nullable Long limit) {
     this.options = Objects.requireNonNull(options, "options");
     this.configuredRowType = Objects.requireNonNull(rowType, "rowType");
     this.selectedColumns =
         selectedColumns == null ? null : Arrays.copyOf(selectedColumns, selectedColumns.length);
     this.filter = filter == null || filter.isBlank() ? null : filter;
+    this.limit = limit;
     this.allocator = new RootAllocator(Long.MAX_VALUE);
   }
 
@@ -84,6 +94,10 @@ class LanceSourceSplitReader implements SplitReader<RowData, LanceSourceSplit> {
         currentSplit = pendingSplits.pollFirst();
         if (currentSplit == null) {
           return LanceRecordsWithSplitIds.empty();
+        }
+        if (limit != null && emitted >= limit) {
+          // Budget already satisfied — drain remaining splits without opening any scanner.
+          return finishCurrentSplit();
         }
         ensureDatasetOpen(currentSplit.datasetVersion());
         openScanner(currentSplit);
@@ -116,7 +130,22 @@ class LanceSourceSplitReader implements SplitReader<RowData, LanceSourceSplit> {
         continue;
       }
 
+      if (limit != null) {
+        long remaining = limit - emitted;
+        if (remaining <= 0) {
+          return finishCurrentSplit();
+        }
+        if (rows.size() > remaining) {
+          rows = rows.subList(0, (int) remaining);
+        }
+      }
+
+      if (rows.isEmpty()) {
+        continue;
+      }
+
       consumedFromSplit += rows.size();
+      emitted += rows.size();
       return LanceRecordsWithSplitIds.forRecords(currentSplit.splitId(), rows);
     }
   }
@@ -198,9 +227,14 @@ class LanceSourceSplitReader implements SplitReader<RowData, LanceSourceSplit> {
     if (filter != null) {
       builder.filter(filter);
     }
+    if (limit != null) {
+      // Read only this reader's remaining limit budget plus rows skipped during restore.
+      long remaining = limit - emitted;
+      builder.limit(addWithoutOverflow(remaining, split.recordsToSkip()));
+    }
 
     Fragment fragment = findFragment(split.fragmentId());
-    // TODO: Ensure Lance fragment scan order is stable before relying on recordsToSkip for restore.
+    // TODO: Ensure stable fragment scan order for recordsToSkip restore.
     try {
       currentScanner = fragment.newScan(builder.build());
       currentReader = currentScanner.scanBatches();
@@ -208,6 +242,13 @@ class LanceSourceSplitReader implements SplitReader<RowData, LanceSourceSplit> {
       throw new IOException("Cannot open Lance fragment scanner: " + split.fragmentId(), e);
     }
     consumedFromSplit = 0L;
+  }
+
+  private static long addWithoutOverflow(long left, long right) {
+    if (Long.MAX_VALUE - left < right) {
+      return Long.MAX_VALUE;
+    }
+    return left + right;
   }
 
   private Fragment findFragment(int fragmentId) throws IOException {

@@ -13,6 +13,11 @@
  */
 package org.apache.flink.connector.lance.table;
 
+import org.apache.flink.connector.lance.source.scan.LanceScanOptions;
+
+import org.lance.Dataset;
+import org.lance.Version;
+
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.TableResult;
@@ -20,14 +25,20 @@ import org.apache.flink.table.catalog.Catalog;
 import org.apache.flink.table.catalog.CatalogBaseTable;
 import org.apache.flink.table.catalog.ObjectPath;
 import org.apache.flink.table.catalog.ResolvedSchema;
+import org.apache.flink.table.catalog.exceptions.CatalogException;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
 
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -226,6 +237,165 @@ class LanceNamespaceCatalogITCase {
             + ")");
     tableEnv.executeSql("USE CATALOG " + name);
     return tableEnv;
+  }
+
+  @Test
+  void testForSystemTimeAsOfReadsHistoricalVersion() throws Exception {
+    EnvironmentSettings settings = EnvironmentSettings.newInstance().inBatchMode().build();
+    TableEnvironment tableEnv = TableEnvironment.create(settings);
+    // Pin the session timezone so the TIMESTAMP literal we build below round-trips
+    // deterministically
+    // through Flink's session-tz-aware conversion.
+    tableEnv.getConfig().setLocalTimeZone(ZoneOffset.UTC);
+
+    tableEnv.executeSql(
+        "CREATE CATALOG my_catalog WITH ("
+            + "'type' = 'lance', "
+            + "'warehouse' = "
+            + sqlString(tempDir.toUri().toString())
+            + ")");
+    tableEnv.executeSql("USE CATALOG my_catalog");
+    tableEnv.executeSql("CREATE TABLE word_count (word STRING, cnt BIGINT)");
+
+    tableEnv.executeSql("INSERT INTO word_count VALUES ('a', CAST(10 AS BIGINT))").await();
+    long afterFirstMillis = latestVersionDataTime(tableEnv, "word_count");
+
+    Thread.sleep(200);
+
+    tableEnv.executeSql("INSERT INTO word_count VALUES ('b', CAST(20 AS BIGINT))").await();
+
+    // No time travel: both rows visible.
+    assertThat(collectRows(tableEnv.executeSql("SELECT word FROM word_count"))).hasSize(2);
+
+    // Pick a timestamp strictly between the two inserts (sleep above guarantees the gap).
+    long queryMillis = afterFirstMillis + 100;
+    String literal =
+        Instant.ofEpochMilli(queryMillis)
+            .atZone(ZoneOffset.UTC)
+            .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS"));
+    List<Row> rows =
+        collectRows(
+            tableEnv.executeSql(
+                "SELECT word, cnt FROM word_count FOR SYSTEM_TIME AS OF TIMESTAMP '"
+                    + literal
+                    + "'"));
+
+    assertThat(rows).containsExactly(Row.of("a", 10L));
+  }
+
+  @Test
+  void testCatalogTimeTravelPinsOptionsToScanVersion() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql("CREATE TABLE pinned (id BIGINT)");
+    tableEnv.executeSql("INSERT INTO pinned VALUES (CAST(1 AS BIGINT))").await();
+    long afterFirstMillis = latestVersionDataTime(tableEnv, "pinned");
+
+    Thread.sleep(200);
+
+    tableEnv.executeSql("INSERT INTO pinned VALUES (CAST(2 AS BIGINT))").await();
+    long latestVersion = latestVersionOf(tableEnv, "pinned");
+
+    Catalog catalog = tableEnv.getCatalog("my_catalog").orElseThrow();
+    CatalogBaseTable table =
+        catalog.getTable(new ObjectPath("default", "pinned"), afterFirstMillis + 100);
+
+    Map<String, String> options = table.getOptions();
+    assertThat(options).containsKey(LanceScanOptions.SCAN_VERSION.key());
+    assertThat(options).doesNotContainKey(LanceScanOptions.SCAN_TIMESTAMP_MILLIS.key());
+    long pinnedVersion = Long.parseLong(options.get(LanceScanOptions.SCAN_VERSION.key()));
+    assertThat(pinnedVersion).isGreaterThanOrEqualTo(1L).isLessThan(latestVersion);
+  }
+
+  @Test
+  void testCatalogTimeTravelUsesHistoricalSchema() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql("CREATE TABLE evolving (id BIGINT)");
+    tableEnv.executeSql("INSERT INTO evolving VALUES (CAST(1 AS BIGINT))").await();
+    long afterFirstMillis = latestVersionDataTime(tableEnv, "evolving");
+
+    Thread.sleep(200);
+
+    // Evolve the schema at the Lance level (bypassing Flink) so a column appears in newer versions
+    // but not in earlier ones.
+    Catalog catalog = tableEnv.getCatalog("my_catalog").orElseThrow();
+    String datasetPath =
+        catalog.getTable(new ObjectPath("default", "evolving")).getOptions().get("path");
+    try (BufferAllocator alloc = new RootAllocator();
+        Dataset ds = Dataset.open().allocator(alloc).uri(datasetPath).build()) {
+      ds.addColumns(
+          List.of(
+              new org.apache.arrow.vector.types.pojo.Field(
+                  "name",
+                  org.apache.arrow.vector.types.pojo.FieldType.nullable(
+                      new org.apache.arrow.vector.types.pojo.ArrowType.Utf8()),
+                  null)));
+    }
+
+    // Latest: 2 columns.
+    CatalogBaseTable current = catalog.getTable(new ObjectPath("default", "evolving"));
+    assertThat(current.getUnresolvedSchema().getColumns()).hasSize(2);
+
+    // Historical (before addColumns): 1 column.
+    CatalogBaseTable historical =
+        catalog.getTable(new ObjectPath("default", "evolving"), afterFirstMillis + 100);
+    assertThat(historical.getUnresolvedSchema().getColumns()).hasSize(1);
+    assertThat(historical.getUnresolvedSchema().getColumns().get(0).getName()).isEqualTo("id");
+  }
+
+  @Test
+  void testCatalogTimeTravelRejectsTooEarlyTimestamp() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql("CREATE TABLE too_early (id BIGINT)");
+    tableEnv.executeSql("INSERT INTO too_early VALUES (CAST(1 AS BIGINT))").await();
+
+    Catalog catalog = tableEnv.getCatalog("my_catalog").orElseThrow();
+    assertThatThrownBy(() -> catalog.getTable(new ObjectPath("default", "too_early"), 0L))
+        .isInstanceOf(CatalogException.class)
+        .hasMessageContaining("Cannot time-travel to timestamp 0")
+        .hasMessageContaining("older than the dataset's earliest available version");
+  }
+
+  @Test
+  void testNormalGetTableHasNoScanOptions() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql("CREATE TABLE plain (id BIGINT)");
+    tableEnv.executeSql("INSERT INTO plain VALUES (CAST(1 AS BIGINT))").await();
+
+    Catalog catalog = tableEnv.getCatalog("my_catalog").orElseThrow();
+    Map<String, String> options = catalog.getTable(new ObjectPath("default", "plain")).getOptions();
+
+    assertThat(options).containsOnlyKeys("connector", "path");
+    for (org.apache.flink.configuration.ConfigOption<?> scanOption : LanceScanOptions.ALL_OPTIONS) {
+      assertThat(options).doesNotContainKey(scanOption.key());
+    }
+  }
+
+  private static long latestVersionOf(TableEnvironment tableEnv, String tableName)
+      throws Exception {
+    Catalog catalog = tableEnv.getCatalog("my_catalog").orElseThrow();
+    CatalogBaseTable table = catalog.getTable(new ObjectPath("default", tableName));
+    String datasetPath = table.getOptions().get("path");
+    try (BufferAllocator alloc = new RootAllocator();
+        Dataset ds = Dataset.open().allocator(alloc).uri(datasetPath).build()) {
+      return ds.latestVersion();
+    }
+  }
+
+  private static long latestVersionDataTime(TableEnvironment tableEnv, String tableName)
+      throws Exception {
+    Catalog catalog = tableEnv.getCatalog("my_catalog").orElseThrow();
+    CatalogBaseTable table = catalog.getTable(new ObjectPath("default", tableName));
+    String datasetPath = table.getOptions().get("path");
+    try (BufferAllocator alloc = new RootAllocator();
+        Dataset ds = Dataset.open().allocator(alloc).uri(datasetPath).build()) {
+      long latest = ds.latestVersion();
+      for (Version v : ds.listVersions()) {
+        if (v.getId() == latest) {
+          return v.getDataTime().toInstant().toEpochMilli();
+        }
+      }
+      throw new IllegalStateException("Latest version not found for " + tableName);
+    }
   }
 
   private static boolean nullabilityOf(ResolvedSchema schema, String column) {
