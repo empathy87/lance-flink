@@ -13,12 +13,12 @@
  */
 package org.apache.flink.connector.lance.table;
 
+import org.apache.flink.connector.lance.LanceDatasetOpener;
 import org.apache.flink.connector.lance.converter.LanceTypeConverter;
 import org.apache.flink.connector.lance.source.scan.LanceScanOptions;
 import org.apache.flink.connector.lance.source.scan.LanceScanVersionResolver;
 
 import org.lance.Dataset;
-import org.lance.ReadOptions;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.CreateNamespaceRequest;
 import org.lance.namespace.model.CreateTableRequest;
@@ -80,6 +80,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -314,8 +315,9 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
 
   @Override
   public boolean tableExists(ObjectPath tablePath) throws CatalogException {
+    ObjectPath baseTablePath = resolveBaseTable(tablePath);
     try {
-      namespace.tableExists(new TableExistsRequest().id(tableId(tablePath)));
+      namespace.tableExists(new TableExistsRequest().id(tableId(baseTablePath)));
       return true;
     } catch (RuntimeException e) {
       if (isNamespaceNotFound(e)) {
@@ -328,6 +330,12 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
   @Override
   public CatalogBaseTable getTable(ObjectPath tablePath)
       throws TableNotExistException, CatalogException {
+    Optional<MetadataTableType> metadataType = parseMetadataSuffix(tablePath);
+    if (metadataType.isPresent()) {
+      ObjectPath baseTablePath = resolveBaseTable(tablePath);
+      String datasetPath = resolveDatasetPath(baseTablePath);
+      return metadataTableOf(metadataType.get(), datasetPath);
+    }
     String datasetPath = resolveDatasetPath(tablePath);
     return loadTable(tablePath, datasetPath, Collections.emptyMap(), null);
   }
@@ -335,6 +343,10 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
   @Override
   public CatalogBaseTable getTable(ObjectPath tablePath, long timestamp)
       throws TableNotExistException, CatalogException {
+    if (parseMetadataSuffix(tablePath).isPresent()) {
+      throw new CatalogException(
+          "Time travel is not supported on Lance metadata tables: " + tablePath);
+    }
     String datasetPath = resolveDatasetPath(tablePath);
     long resolvedVersion = resolveVersionForTimestamp(tablePath, datasetPath, timestamp);
 
@@ -344,6 +356,52 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
         Collections.singletonMap(
             LanceScanOptions.SCAN_VERSION.key(), Long.toString(resolvedVersion)),
         resolvedVersion);
+  }
+
+  private static Optional<MetadataTableType> parseMetadataSuffix(ObjectPath tablePath) {
+    return parseMetadataSuffix(tablePath.getObjectName());
+  }
+
+  private static Optional<MetadataTableType> parseMetadataSuffix(String tableName) {
+    return MetadataTableType.splitName(tableName)
+        .flatMap(parts -> MetadataTableType.fromSuffix(parts.suffix()));
+  }
+
+  /**
+   * Returns the base table path for recognized metadata tables; leaves unknown suffixes unchanged.
+   */
+  private static ObjectPath resolveBaseTable(ObjectPath tablePath) {
+    return MetadataTableType.splitName(tablePath.getObjectName())
+        .filter(parts -> MetadataTableType.fromSuffix(parts.suffix()).isPresent())
+        .map(parts -> new ObjectPath(tablePath.getDatabaseName(), parts.baseName()))
+        .orElse(tablePath);
+  }
+
+  private static void rejectMetadataMutation(ObjectPath tablePath, String operation) {
+    parseMetadataSuffix(tablePath)
+        .ifPresent(
+            type -> {
+              throw new CatalogException(
+                  "Cannot "
+                      + operation
+                      + " Lance metadata table '"
+                      + tablePath
+                      + "': $"
+                      + type.suffix()
+                      + " is a read-only virtual view.");
+            });
+  }
+
+  private static CatalogBaseTable metadataTableOf(MetadataTableType type, String datasetPath) {
+    Map<String, String> options = new HashMap<>();
+    options.put(CONNECTOR_OPTION, LanceDynamicTableFactory.IDENTIFIER);
+    options.put(PATH_OPTION, datasetPath);
+    options.put(LanceDynamicTableFactory.METADATA_TYPE.key(), type.suffix());
+    return CatalogTable.of(
+        type.schema(),
+        "Lance metadata view ($" + type.suffix() + ")",
+        Collections.emptyList(),
+        options);
   }
 
   private long resolveVersionForTimestamp(
@@ -420,11 +478,7 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
   }
 
   private Dataset openDataset(String datasetPath, @Nullable Long version) {
-    if (version == null) {
-      return Dataset.open().allocator(allocator).uri(datasetPath).build();
-    }
-    ReadOptions readOptions = new ReadOptions.Builder().setVersion(version).build();
-    return Dataset.open().readOptions(readOptions).allocator(allocator).uri(datasetPath).build();
+    return LanceDatasetOpener.open(allocator, datasetPath, version);
   }
 
   private static Map<String, String> buildTableOptions(String datasetPath) {
@@ -448,6 +502,7 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
   @Override
   public void createTable(ObjectPath tablePath, CatalogBaseTable table, boolean ignoreIfExists)
       throws TableAlreadyExistException, DatabaseNotExistException, CatalogException {
+    rejectMetadataMutation(tablePath, "create");
     if (!databaseExists(tablePath.getDatabaseName())) {
       throw new DatabaseNotExistException(getName(), tablePath.getDatabaseName());
     }
@@ -663,6 +718,7 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
   @Override
   public void dropTable(ObjectPath tablePath, boolean ignoreIfNotExists)
       throws TableNotExistException, CatalogException {
+    rejectMetadataMutation(tablePath, "drop");
     try {
       namespace.dropTable(new DropTableRequest().id(tableId(tablePath)));
     } catch (RuntimeException e) {
@@ -679,6 +735,19 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
   @Override
   public void renameTable(ObjectPath tablePath, String newTableName, boolean ignoreIfNotExists)
       throws TableNotExistException, CatalogException {
+    rejectMetadataMutation(tablePath, "rename");
+    parseMetadataSuffix(newTableName)
+        .ifPresent(
+            type -> {
+              throw new CatalogException(
+                  "Cannot rename Lance table '"
+                      + tablePath
+                      + "' to reserved metadata name '"
+                      + newTableName
+                      + "': $"
+                      + type.suffix()
+                      + " is a read-only virtual view.");
+            });
     if (!tableExists(tablePath)) {
       if (!ignoreIfNotExists) {
         throw new TableNotExistException(getName(), tablePath);
@@ -692,6 +761,7 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
   @Override
   public void alterTable(ObjectPath tablePath, CatalogBaseTable newTable, boolean ignoreIfNotExists)
       throws TableNotExistException, CatalogException {
+    rejectMetadataMutation(tablePath, "alter");
     if (!tableExists(tablePath)) {
       if (!ignoreIfNotExists) {
         throw new TableNotExistException(getName(), tablePath);

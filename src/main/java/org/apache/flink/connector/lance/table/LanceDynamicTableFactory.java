@@ -27,8 +27,10 @@ import org.apache.flink.table.factories.DynamicTableSinkFactory;
 import org.apache.flink.table.factories.DynamicTableSourceFactory;
 import org.apache.flink.table.factories.FactoryUtil;
 
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /** Dynamic table source/sink factory for Lance. */
@@ -61,6 +63,15 @@ public class LanceDynamicTableFactory
           .defaultValue(1000000)
           .withDescription("Maximum rows per file.");
 
+  public static final ConfigOption<String> METADATA_TYPE =
+      ConfigOptions.key("metadata-type")
+          .stringType()
+          .noDefaultValue()
+          .withDescription(
+              "Selects a virtual metadata view (snapshots | tags | branches | fragments |"
+                  + " options) instead of the base table data. Set by the catalog when resolving"
+                  + " a <table>$<suffix> name.");
+
   @Override
   public String factoryIdentifier() {
     return IDENTIFIER;
@@ -78,6 +89,7 @@ public class LanceDynamicTableFactory
     options.add(READ_BATCH_SIZE);
     options.add(WRITE_BATCH_SIZE);
     options.add(WRITE_MAX_ROWS_PER_FILE);
+    options.add(METADATA_TYPE);
     options.addAll(LanceScanOptions.ALL_OPTIONS);
     return Set.copyOf(options);
   }
@@ -88,6 +100,11 @@ public class LanceDynamicTableFactory
     helper.validate();
 
     ReadableConfig config = helper.getOptions();
+    String metadataType = config.getOptional(METADATA_TYPE).orElse(null);
+    if (metadataType != null) {
+      return createMetadataTableSource(config, context, metadataType);
+    }
+
     LanceOptions options = buildLanceOptions(config);
     LanceScanOptions scanOptions = buildScanOptions(config);
 
@@ -95,6 +112,34 @@ public class LanceDynamicTableFactory
         options,
         scanOptions,
         context.getCatalogTable().getResolvedSchema().toPhysicalRowDataType());
+  }
+
+  private static DynamicTableSource createMetadataTableSource(
+      ReadableConfig config, Context context, String metadataType) {
+    MetadataTableType type =
+        MetadataTableType.fromSuffix(metadataType)
+            .orElseThrow(
+                () ->
+                    new ValidationException(
+                        "Unknown Lance metadata-type '"
+                            + metadataType
+                            + "'. Supported: snapshots, tags, branches, fragments, options."));
+    rejectScanOptionsForMetadata(config);
+
+    Map<String, String> sourceTableOptions = new HashMap<>(context.getCatalogTable().getOptions());
+    sourceTableOptions.remove(METADATA_TYPE.key());
+    return new LanceMetadataTableSource(config.get(PATH), type, sourceTableOptions);
+  }
+
+  private static void rejectScanOptionsForMetadata(ReadableConfig config) {
+    for (ConfigOption<?> option : LanceScanOptions.ALL_OPTIONS) {
+      if (config.getOptional(option).isPresent()) {
+        throw new ValidationException(
+            "Lance scan option '"
+                + option.key()
+                + "' is not supported on metadata tables (metadata-type is set).");
+      }
+    }
   }
 
   private static LanceScanOptions buildScanOptions(ReadableConfig config) {
@@ -111,6 +156,9 @@ public class LanceDynamicTableFactory
     helper.validate();
 
     ReadableConfig config = helper.getOptions();
+    if (config.getOptional(METADATA_TYPE).isPresent()) {
+      throw new ValidationException("Lance metadata tables are read-only.");
+    }
     rejectScanOptionsForSink(config);
     LanceOptions options = buildLanceOptions(config);
     ResolvedSchema schema = context.getCatalogTable().getResolvedSchema();

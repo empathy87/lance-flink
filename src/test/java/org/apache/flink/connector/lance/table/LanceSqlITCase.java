@@ -79,6 +79,7 @@ class LanceSqlITCase {
             "read.batch-size",
             "write.batch-size",
             "write.max-rows-per-file",
+            "metadata-type",
             "scan.version",
             "scan.snapshot-id",
             "scan.tag-name",
