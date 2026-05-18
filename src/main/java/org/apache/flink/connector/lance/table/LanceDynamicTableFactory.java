@@ -14,6 +14,9 @@
 package org.apache.flink.connector.lance.table;
 
 import org.apache.flink.connector.lance.config.LanceOptions;
+import org.apache.flink.connector.lance.source.LanceScanMode;
+import org.apache.flink.connector.lance.source.LanceSourceOptions;
+import org.apache.flink.connector.lance.source.continuous.LanceContinuousOptions;
 import org.apache.flink.connector.lance.source.scan.LanceScanOptions;
 
 import org.apache.flink.configuration.ConfigOption;
@@ -26,6 +29,7 @@ import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.factories.DynamicTableSinkFactory;
 import org.apache.flink.table.factories.DynamicTableSourceFactory;
 import org.apache.flink.table.factories.FactoryUtil;
+import org.apache.flink.table.types.DataType;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -34,6 +38,7 @@ import java.util.Map;
 import java.util.Set;
 
 /** Dynamic table source/sink factory for Lance. */
+// TODO: Add index/vector options back when index creation or vector search is supported.
 public class LanceDynamicTableFactory
     implements DynamicTableSourceFactory, DynamicTableSinkFactory {
 
@@ -83,14 +88,15 @@ public class LanceDynamicTableFactory
   }
 
   @Override
-  // TODO: Add index/vector options back when index creation or vector search is supported.
   public Set<ConfigOption<?>> optionalOptions() {
     Set<ConfigOption<?>> options = new HashSet<>();
     options.add(READ_BATCH_SIZE);
     options.add(WRITE_BATCH_SIZE);
     options.add(WRITE_MAX_ROWS_PER_FILE);
     options.add(METADATA_TYPE);
+    options.add(LanceSourceOptions.SCAN_MODE);
     options.addAll(LanceScanOptions.ALL_OPTIONS);
+    options.addAll(LanceContinuousOptions.ALL_OPTIONS);
     return Set.copyOf(options);
   }
 
@@ -105,13 +111,37 @@ public class LanceDynamicTableFactory
       return createMetadataTableSource(config, context, metadataType);
     }
 
+    LanceScanMode scanMode = parseScanMode(config);
     LanceOptions options = buildLanceOptions(config);
-    LanceScanOptions scanOptions = buildScanOptions(config);
+    ResolvedSchema schema = context.getCatalogTable().getResolvedSchema();
+    DataType physicalDataType = schema.toPhysicalRowDataType();
 
-    return new LanceDynamicTableSource(
-        options,
-        scanOptions,
-        context.getCatalogTable().getResolvedSchema().toPhysicalRowDataType());
+    if (scanMode == LanceScanMode.BATCH) {
+      rejectIfPresent(
+          config,
+          LanceContinuousOptions.ALL_OPTIONS,
+          "Lance continuous-source option",
+          "is only supported when scan.mode = continuous (current: scan.mode = batch (the"
+              + " default)).");
+      LanceScanOptions scanOptions = buildScanOptions(config);
+      return LanceDynamicTableSource.forBatch(options, scanOptions, physicalDataType);
+    }
+
+    rejectIfPresent(
+        config,
+        LanceScanOptions.ALL_OPTIONS,
+        "Lance batch scan option",
+        "is not supported when scan.mode = continuous. Use scan.startup-mode plus the matching"
+            + " scan.startup-* option instead.");
+    LanceContinuousOptions continuousOptions = buildContinuousOptions(config);
+    if (schema.getPrimaryKey().isPresent()) {
+      // TODO: Re-enable when Lance Java exposes transaction/delta row streams.
+      throw new ValidationException(
+          "Continuous reads from PK / upsert Lance tables are not supported. Fragment-diff"
+              + " discovery cannot represent updates or deletes safely. Use scan.mode=batch for PK"
+              + " reads.");
+    }
+    return LanceDynamicTableSource.forContinuous(options, continuousOptions, physicalDataType);
   }
 
   private static DynamicTableSource createMetadataTableSource(
@@ -124,20 +154,44 @@ public class LanceDynamicTableFactory
                         "Unknown Lance metadata-type '"
                             + metadataType
                             + "'. Supported: snapshots, tags, branches, fragments, options."));
-    rejectScanOptionsForMetadata(config);
+    if (parseScanMode(config) == LanceScanMode.CONTINUOUS) {
+      throw new ValidationException(
+          "scan.mode = continuous is not supported on metadata tables (metadata-type is set);"
+              + " metadata reads always run at HEAD.");
+    }
+    rejectIfPresent(
+        config,
+        LanceScanOptions.ALL_OPTIONS,
+        "Lance scan option",
+        "is not supported on metadata tables (metadata-type is set).");
+    rejectIfPresent(
+        config,
+        LanceContinuousOptions.ALL_OPTIONS,
+        "Lance continuous-source option",
+        "is only supported when scan.mode = continuous (current: metadata tables (metadata-type is"
+            + " set)).");
 
     Map<String, String> sourceTableOptions = new HashMap<>(context.getCatalogTable().getOptions());
     sourceTableOptions.remove(METADATA_TYPE.key());
     return new LanceMetadataTableSource(config.get(PATH), type, sourceTableOptions);
   }
 
-  private static void rejectScanOptionsForMetadata(ReadableConfig config) {
-    for (ConfigOption<?> option : LanceScanOptions.ALL_OPTIONS) {
+  private static LanceScanMode parseScanMode(ReadableConfig config) {
+    try {
+      return LanceScanMode.fromString(config.get(LanceSourceOptions.SCAN_MODE));
+    } catch (IllegalArgumentException e) {
+      throw new ValidationException(e.getMessage(), e);
+    }
+  }
+
+  private static void rejectIfPresent(
+      ReadableConfig config,
+      Iterable<? extends ConfigOption<?>> options,
+      String prefix,
+      String reason) {
+    for (ConfigOption<?> option : options) {
       if (config.getOptional(option).isPresent()) {
-        throw new ValidationException(
-            "Lance scan option '"
-                + option.key()
-                + "' is not supported on metadata tables (metadata-type is set).");
+        throw new ValidationException(prefix + " '" + option.key() + "' " + reason);
       }
     }
   }
@@ -150,6 +204,14 @@ public class LanceDynamicTableFactory
     }
   }
 
+  private static LanceContinuousOptions buildContinuousOptions(ReadableConfig config) {
+    try {
+      return LanceContinuousOptions.fromConfig(config);
+    } catch (IllegalArgumentException e) {
+      throw new ValidationException("Invalid Lance continuous options: " + e.getMessage(), e);
+    }
+  }
+
   @Override
   public DynamicTableSink createDynamicTableSink(Context context) {
     FactoryUtil.TableFactoryHelper helper = FactoryUtil.createTableFactoryHelper(this, context);
@@ -159,20 +221,22 @@ public class LanceDynamicTableFactory
     if (config.getOptional(METADATA_TYPE).isPresent()) {
       throw new ValidationException("Lance metadata tables are read-only.");
     }
-    rejectScanOptionsForSink(config);
+    rejectIfPresent(
+        config,
+        List.of(LanceSourceOptions.SCAN_MODE),
+        "Lance source option",
+        "is only supported for reads.");
+    rejectIfPresent(
+        config, LanceScanOptions.ALL_OPTIONS, "Lance scan option", "is only supported for reads.");
+    rejectIfPresent(
+        config,
+        LanceContinuousOptions.ALL_OPTIONS,
+        "Lance continuous-source option",
+        "is only supported for reads.");
     LanceOptions options = buildLanceOptions(config);
     ResolvedSchema schema = context.getCatalogTable().getResolvedSchema();
 
     return new LanceDynamicTableSink(options, schema.toPhysicalRowDataType(), primaryKeys(schema));
-  }
-
-  private static void rejectScanOptionsForSink(ReadableConfig config) {
-    for (ConfigOption<?> option : LanceScanOptions.ALL_OPTIONS) {
-      if (config.getOptional(option).isPresent()) {
-        throw new ValidationException(
-            "Lance scan option '" + option.key() + "' is only supported for reads.");
-      }
-    }
   }
 
   private static List<String> primaryKeys(ResolvedSchema schema) {

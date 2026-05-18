@@ -18,17 +18,16 @@ import org.lance.ReadOptions;
 
 import org.apache.arrow.memory.BufferAllocator;
 
-import javax.annotation.Nullable;
-
-/** Opens a Lance {@link Dataset}, pinning to a specific version when one is provided. */
+/** Opens a Lance {@link Dataset} at HEAD or pinned to a specific version. */
 public final class LanceDatasetOpener {
 
   private LanceDatasetOpener() {}
 
-  public static Dataset open(BufferAllocator allocator, String path, @Nullable Long version) {
-    if (version == null) {
-      return Dataset.open().allocator(allocator).uri(path).build();
-    }
+  public static Dataset open(BufferAllocator allocator, String path) {
+    return Dataset.open().allocator(allocator).uri(path).build();
+  }
+
+  public static Dataset open(BufferAllocator allocator, String path, long version) {
     ReadOptions readOptions = new ReadOptions.Builder().setVersion(version).build();
     return Dataset.open().readOptions(readOptions).allocator(allocator).uri(path).build();
   }

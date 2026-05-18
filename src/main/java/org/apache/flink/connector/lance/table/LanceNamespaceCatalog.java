@@ -406,7 +406,7 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
 
   private long resolveVersionForTimestamp(
       ObjectPath tablePath, String datasetPath, long timestamp) {
-    try (Dataset dataset = openDataset(datasetPath, null)) {
+    try (Dataset dataset = LanceDatasetOpener.open(allocator, datasetPath)) {
       return LanceScanVersionResolver.resolveVersion(
           LanceScanOptions.timestampMillis(timestamp), dataset);
     } catch (IllegalArgumentException e) {
@@ -432,7 +432,10 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
       throws CatalogException {
     RowType rowType;
     List<String> primaryKeys;
-    try (Dataset dataset = openDataset(datasetPath, schemaVersion)) {
+    try (Dataset dataset =
+        schemaVersion == null
+            ? LanceDatasetOpener.open(allocator, datasetPath)
+            : LanceDatasetOpener.open(allocator, datasetPath, schemaVersion)) {
       org.apache.arrow.vector.types.pojo.Schema arrowSchema = dataset.getSchema();
       rowType = LanceTypeConverter.toFlinkRowType(arrowSchema);
       primaryKeys = readPrimaryKeysFromMetadata(arrowSchema.getCustomMetadata());
@@ -475,10 +478,6 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
     }
 
     return normalizeDatasetPath(location);
-  }
-
-  private Dataset openDataset(String datasetPath, @Nullable Long version) {
-    return LanceDatasetOpener.open(allocator, datasetPath, version);
   }
 
   private static Map<String, String> buildTableOptions(String datasetPath) {

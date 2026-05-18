@@ -17,21 +17,13 @@ import org.apache.flink.connector.lance.config.LanceOptions;
 
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.types.DataType;
-import org.apache.flink.table.types.logical.ArrayType;
-import org.apache.flink.table.types.logical.BigIntType;
-import org.apache.flink.table.types.logical.FloatType;
-import org.apache.flink.table.types.logical.RowType;
-import org.apache.flink.table.types.logical.VarCharType;
 
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -42,23 +34,19 @@ class LanceSqlITCase {
   @TempDir Path tempDir;
 
   private String datasetPath;
-  private String warehousePath;
 
   @BeforeEach
   void setUp() {
     datasetPath = tempDir.resolve("test_sql_dataset").toString();
-    warehousePath = tempDir.resolve("test_warehouse").toString();
   }
 
   @Test
-  @DisplayName("Test LanceDynamicTableFactory identifier")
   void testFactoryIdentifier() {
     LanceDynamicTableFactory factory = new LanceDynamicTableFactory();
     assertThat(factory.factoryIdentifier()).isEqualTo("lance");
   }
 
   @Test
-  @DisplayName("Test LanceDynamicTableFactory required options")
   void testRequiredOptions() {
     LanceDynamicTableFactory factory = new LanceDynamicTableFactory();
     Set<String> requiredOptionKeys = new HashSet<>();
@@ -68,7 +56,6 @@ class LanceSqlITCase {
   }
 
   @Test
-  @DisplayName("Test LanceDynamicTableFactory optional options")
   void testOptionalOptions() {
     LanceDynamicTableFactory factory = new LanceDynamicTableFactory();
     Set<String> optionalOptionKeys = new HashSet<>();
@@ -84,7 +71,14 @@ class LanceSqlITCase {
             "scan.snapshot-id",
             "scan.tag-name",
             "scan.timestamp-millis",
-            "scan.timestamp");
+            "scan.timestamp",
+            "scan.mode",
+            "continuous.discovery-interval",
+            "scan.startup-mode",
+            "scan.startup-snapshot-id",
+            "scan.startup-tag-name",
+            "scan.startup-timestamp-millis",
+            "scan.startup-timestamp");
     assertThat(optionalOptionKeys)
         .doesNotContain(
             "read.columns",
@@ -99,15 +93,8 @@ class LanceSqlITCase {
   }
 
   @Test
-  @DisplayName("Test LanceDynamicTableSource creation")
   void testDynamicTableSourceCreation() {
     LanceOptions options = LanceOptions.builder().path(datasetPath).readBatchSize(512).build();
-
-    List<RowType.RowField> fields = new ArrayList<>();
-    fields.add(new RowType.RowField("id", new BigIntType()));
-    fields.add(new RowType.RowField("content", new VarCharType()));
-    fields.add(new RowType.RowField("embedding", new ArrayType(new FloatType())));
-    RowType rowType = new RowType(fields);
 
     DataType dataType =
         DataTypes.ROW(
@@ -115,7 +102,7 @@ class LanceSqlITCase {
             DataTypes.FIELD("content", DataTypes.STRING()),
             DataTypes.FIELD("embedding", DataTypes.ARRAY(DataTypes.FLOAT())));
 
-    LanceDynamicTableSource source = new LanceDynamicTableSource(options, dataType);
+    LanceDynamicTableSource source = LanceDynamicTableSource.forBatch(options, dataType);
 
     assertThat(source.getOptions()).isEqualTo(options);
     assertThat(source.getPhysicalDataType()).isEqualTo(dataType);
@@ -123,7 +110,6 @@ class LanceSqlITCase {
   }
 
   @Test
-  @DisplayName("Test LanceDynamicTableSink creation")
   void testDynamicTableSinkCreation() {
     LanceOptions options = LanceOptions.builder().path(datasetPath).writeBatchSize(256).build();
 
@@ -141,13 +127,11 @@ class LanceSqlITCase {
   }
 
   @Test
-  @DisplayName("Test LanceDynamicTableSource copy")
   void testDynamicTableSourceCopy() {
     LanceOptions options = LanceOptions.builder().path(datasetPath).build();
-
     DataType dataType = DataTypes.ROW(DataTypes.FIELD("id", DataTypes.BIGINT()));
 
-    LanceDynamicTableSource source = new LanceDynamicTableSource(options, dataType);
+    LanceDynamicTableSource source = LanceDynamicTableSource.forBatch(options, dataType);
     LanceDynamicTableSource copiedSource = (LanceDynamicTableSource) source.copy();
 
     assertThat(copiedSource).isNotSameAs(source);
@@ -155,10 +139,8 @@ class LanceSqlITCase {
   }
 
   @Test
-  @DisplayName("Test LanceDynamicTableSink copy")
   void testDynamicTableSinkCopy() {
     LanceOptions options = LanceOptions.builder().path(datasetPath).build();
-
     DataType dataType = DataTypes.ROW(DataTypes.FIELD("id", DataTypes.BIGINT()));
 
     LanceDynamicTableSink sink = new LanceDynamicTableSink(options, dataType);
@@ -169,14 +151,12 @@ class LanceSqlITCase {
   }
 
   @Test
-  @DisplayName("Test LanceCatalogFactory identifier")
   void testCatalogFactoryIdentifier() {
     LanceCatalogFactory factory = new LanceCatalogFactory();
     assertThat(factory.factoryIdentifier()).isEqualTo("lance");
   }
 
   @Test
-  @DisplayName("Test LanceCatalogFactory required options")
   void testCatalogRequiredOptions() {
     LanceCatalogFactory factory = new LanceCatalogFactory();
     Set<String> requiredOptionKeys = new HashSet<>();
@@ -186,7 +166,6 @@ class LanceSqlITCase {
   }
 
   @Test
-  @DisplayName("Test LanceCatalogFactory optional options")
   void testCatalogOptionalOptions() {
     LanceCatalogFactory factory = new LanceCatalogFactory();
     Set<String> optionalOptionKeys = new HashSet<>();
@@ -196,7 +175,6 @@ class LanceSqlITCase {
   }
 
   @Test
-  @DisplayName("Test configuration options definition")
   void testConfigOptions() {
     assertThat(LanceDynamicTableFactory.PATH.key()).isEqualTo("path");
     assertThat(LanceDynamicTableFactory.READ_BATCH_SIZE.key()).isEqualTo("read.batch-size");
@@ -208,7 +186,6 @@ class LanceSqlITCase {
   }
 
   @Test
-  @DisplayName("Test Catalog configuration options definition")
   void testCatalogConfigOptions() {
     assertThat(LanceCatalogFactory.WAREHOUSE.key()).isEqualTo("warehouse");
     assertThat(LanceCatalogFactory.DEFAULT_DATABASE.key()).isEqualTo("default-database");
@@ -216,7 +193,6 @@ class LanceSqlITCase {
   }
 
   @Test
-  @DisplayName("Test vector search UDF configuration")
   void testVectorSearchFunctionConfiguration() {
     LanceVectorSearchFunction function = new LanceVectorSearchFunction();
     assertThat(function).isNotNull();

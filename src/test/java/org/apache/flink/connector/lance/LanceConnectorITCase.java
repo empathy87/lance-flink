@@ -19,7 +19,6 @@ import org.apache.flink.connector.lance.config.LanceOptions.MetricType;
 import org.apache.flink.connector.lance.converter.LanceTypeConverter;
 import org.apache.flink.connector.lance.converter.RowDataConverter;
 import org.apache.flink.connector.lance.sink.LanceSinkV2;
-import org.apache.flink.connector.lance.source.LanceSource;
 import org.apache.flink.connector.lance.source.LanceSourceSplit;
 import org.apache.flink.connector.lance.source.LanceSourceSplitSerializer;
 import org.apache.flink.connector.lance.table.LanceDynamicTableFactory;
@@ -45,7 +44,6 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -154,20 +152,6 @@ class LanceConnectorITCase {
   }
 
   @Test
-  @DisplayName("Test LanceSource construction via LanceOptions")
-  void testLanceSourceFromOptions() {
-    LanceOptions options = LanceOptions.builder().path(datasetPath).readBatchSize(256).build();
-
-    LanceSource source =
-        new LanceSource(options, rowType, Arrays.asList("id", "embedding"), "id < 1000");
-
-    assertThat(source.getOptions().getPath()).isEqualTo(datasetPath);
-    assertThat(source.getOptions().getReadBatchSize()).isEqualTo(256);
-    assertThat(source.getSelectedColumns()).containsExactly("id", "embedding");
-    assertThat(source.getRowType()).isEqualTo(rowType);
-  }
-
-  @Test
   @DisplayName("Test LanceSinkV2 construction")
   void testLanceSinkV2Construction() {
     LanceOptions options =
@@ -226,7 +210,7 @@ class LanceConnectorITCase {
     LanceOptions options = LanceOptions.builder().path(datasetPath).build();
 
     // Create DynamicTableSource
-    LanceDynamicTableSource source = new LanceDynamicTableSource(options, dataType);
+    LanceDynamicTableSource source = LanceDynamicTableSource.forBatch(options, dataType);
     assertThat(source.asSummaryString()).isEqualTo("Lance Table Source");
 
     // Create DynamicTableSink

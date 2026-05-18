@@ -69,7 +69,7 @@ public class LanceMetadataInputFormat extends GenericInputFormat<RowData> {
   public void open(GenericInputSplit split) throws IOException {
     super.open(split);
     try (BufferAllocator alloc = new RootAllocator(Long.MAX_VALUE);
-        Dataset ds = LanceDatasetOpener.open(alloc, path, null)) {
+        Dataset ds = LanceDatasetOpener.open(alloc, path)) {
       rows = type.fetch(ds, sourceTableOptions);
     } catch (Exception e) {
       throw new IOException("Failed to read Lance metadata (" + type.suffix() + ") at " + path, e);

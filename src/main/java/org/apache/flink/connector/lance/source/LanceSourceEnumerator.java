@@ -13,6 +13,7 @@
  */
 package org.apache.flink.connector.lance.source;
 
+import org.apache.flink.connector.lance.LanceDatasetOpener;
 import org.apache.flink.connector.lance.config.LanceOptions;
 import org.apache.flink.connector.lance.source.assigner.SimpleSplitAssigner;
 import org.apache.flink.connector.lance.source.assigner.SplitAssigner;
@@ -21,7 +22,6 @@ import org.apache.flink.connector.lance.source.scan.LanceScanVersionResolver;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
-import org.lance.ReadOptions;
 
 import org.apache.flink.api.connector.source.SplitEnumerator;
 import org.apache.flink.api.connector.source.SplitEnumeratorContext;
@@ -140,41 +140,18 @@ public class LanceSourceEnumerator
     if (path == null || path.isBlank()) {
       throw new IllegalArgumentException("Lance dataset path cannot be empty");
     }
-
-    List<LanceSourceSplit> splits = new ArrayList<>();
+    long resolvedVersion;
     try (BufferAllocator alloc = new RootAllocator(Long.MAX_VALUE);
-        Dataset latest = openDataset(path, alloc, null)) {
-      long resolvedVersion = LanceScanVersionResolver.resolveVersion(scanOptions, latest);
-
-      if (resolvedVersion == latest.version()) {
-        addFragments(latest, resolvedVersion, splits);
-      } else {
-        try (Dataset versioned = openDataset(path, alloc, resolvedVersion)) {
-          addFragments(versioned, resolvedVersion, splits);
-        }
+        Dataset head = LanceDatasetOpener.open(alloc, path)) {
+      resolvedVersion = LanceScanVersionResolver.resolveVersion(scanOptions, head);
+    }
+    try (BufferAllocator alloc = new RootAllocator(Long.MAX_VALUE);
+        Dataset pinned = LanceDatasetOpener.open(alloc, path, resolvedVersion)) {
+      List<LanceSourceSplit> splits = new ArrayList<>();
+      for (Fragment frag : pinned.getFragments()) {
+        splits.add(LanceSourceSplit.fragment(resolvedVersion, frag.getId()));
       }
-    } catch (Exception e) {
-      throw new RuntimeException(
-          "Failed to enumerate Lance fragments at " + path + " with " + scanOptions, e);
-    }
-
-    return splits;
-  }
-
-  private static Dataset openDataset(
-      String path, BufferAllocator allocator, @Nullable Long version) {
-    if (version == null) {
-      return Dataset.open().allocator(allocator).uri(path).build();
-    }
-
-    ReadOptions readOptions = new ReadOptions.Builder().setVersion(version).build();
-    return Dataset.open().readOptions(readOptions).allocator(allocator).uri(path).build();
-  }
-
-  private static void addFragments(
-      Dataset dataset, long datasetVersion, List<LanceSourceSplit> splits) {
-    for (Fragment frag : dataset.getFragments()) {
-      splits.add(LanceSourceSplit.fragment(datasetVersion, frag.getId()));
+      return splits;
     }
   }
 }

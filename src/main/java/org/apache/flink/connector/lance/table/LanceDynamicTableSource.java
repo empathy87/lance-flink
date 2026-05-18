@@ -14,7 +14,9 @@
 package org.apache.flink.connector.lance.table;
 
 import org.apache.flink.connector.lance.config.LanceOptions;
+import org.apache.flink.connector.lance.source.ContinuousLanceSource;
 import org.apache.flink.connector.lance.source.LanceSource;
+import org.apache.flink.connector.lance.source.continuous.LanceContinuousOptions;
 import org.apache.flink.connector.lance.source.scan.LanceScanOptions;
 
 import org.apache.flink.table.connector.ChangelogMode;
@@ -27,6 +29,8 @@ import org.apache.flink.table.connector.source.abilities.SupportsProjectionPushD
 import org.apache.flink.table.expressions.ResolvedExpression;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.RowType;
+
+import javax.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -43,20 +47,36 @@ public class LanceDynamicTableSource
 
   private final LanceOptions options;
   private final LanceScanOptions scanOptions;
+  private final @Nullable LanceContinuousOptions continuousOptions;
   private final DataType physicalDataType;
   private int[] projectedFieldIndices;
   private DataType producedDataType;
   private String pushedFilter;
   private Long pushedLimit;
 
-  public LanceDynamicTableSource(LanceOptions options, DataType physicalDataType) {
-    this(options, LanceScanOptions.latest(), physicalDataType);
+  public static LanceDynamicTableSource forBatch(
+      LanceOptions options, LanceScanOptions scanOptions, DataType physicalDataType) {
+    return new LanceDynamicTableSource(options, scanOptions, null, physicalDataType);
   }
 
-  public LanceDynamicTableSource(
-      LanceOptions options, LanceScanOptions scanOptions, DataType physicalDataType) {
+  public static LanceDynamicTableSource forBatch(LanceOptions options, DataType physicalDataType) {
+    return forBatch(options, LanceScanOptions.latest(), physicalDataType);
+  }
+
+  public static LanceDynamicTableSource forContinuous(
+      LanceOptions options, LanceContinuousOptions continuousOptions, DataType physicalDataType) {
+    return new LanceDynamicTableSource(
+        options, LanceScanOptions.latest(), continuousOptions, physicalDataType);
+  }
+
+  private LanceDynamicTableSource(
+      LanceOptions options,
+      LanceScanOptions scanOptions,
+      @Nullable LanceContinuousOptions continuousOptions,
+      DataType physicalDataType) {
     this.options = options;
     this.scanOptions = scanOptions == null ? LanceScanOptions.latest() : scanOptions;
+    this.continuousOptions = continuousOptions;
     this.physicalDataType = physicalDataType;
     this.projectedFieldIndices = null;
     this.producedDataType = physicalDataType;
@@ -67,6 +87,7 @@ public class LanceDynamicTableSource
   private LanceDynamicTableSource(LanceDynamicTableSource source) {
     this.options = source.options;
     this.scanOptions = source.scanOptions;
+    this.continuousOptions = source.continuousOptions;
     this.physicalDataType = source.physicalDataType;
     this.projectedFieldIndices =
         source.projectedFieldIndices == null
@@ -95,6 +116,16 @@ public class LanceDynamicTableSource
               .collect(Collectors.toList());
     }
 
+    if (continuousOptions != null) {
+      return SourceProvider.of(
+          new ContinuousLanceSource(
+              options,
+              outputRowType,
+              projectedColumnNames,
+              pushedFilter,
+              continuousOptions,
+              pushedLimit));
+    }
     return SourceProvider.of(
         new LanceSource(
             options, outputRowType, projectedColumnNames, pushedFilter, scanOptions, pushedLimit));
@@ -162,6 +193,15 @@ public class LanceDynamicTableSource
 
   public LanceScanOptions getScanOptions() {
     return scanOptions;
+  }
+
+  @Nullable
+  public LanceContinuousOptions getContinuousOptions() {
+    return continuousOptions;
+  }
+
+  public boolean isContinuous() {
+    return continuousOptions != null;
   }
 
   public DataType getPhysicalDataType() {

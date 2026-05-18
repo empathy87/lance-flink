@@ -14,7 +14,10 @@
 package org.apache.flink.connector.lance.source;
 
 import org.apache.flink.connector.lance.config.LanceOptions;
-import org.apache.flink.connector.lance.source.scan.LanceScanOptions;
+import org.apache.flink.connector.lance.source.continuous.ContinuousLanceSourceEnumerator;
+import org.apache.flink.connector.lance.source.continuous.LanceContinuousEnumState;
+import org.apache.flink.connector.lance.source.continuous.LanceContinuousEnumStateSerializer;
+import org.apache.flink.connector.lance.source.continuous.LanceContinuousOptions;
 
 import org.apache.flink.api.connector.source.Boundedness;
 import org.apache.flink.api.connector.source.Source;
@@ -28,12 +31,12 @@ import org.apache.flink.table.types.logical.RowType;
 
 import javax.annotation.Nullable;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 
-/** Bounded FLIP-27 source for Lance datasets. */
-public class LanceSource implements Source<RowData, LanceSourceSplit, LanceSourceEnumState> {
+/** Unbounded Lance source backed by continuous fragment discovery. */
+public class ContinuousLanceSource
+    implements Source<RowData, LanceSourceSplit, LanceContinuousEnumState> {
 
   private static final long serialVersionUID = 1L;
 
@@ -41,39 +44,27 @@ public class LanceSource implements Source<RowData, LanceSourceSplit, LanceSourc
   private final RowType rowType;
   private final String[] selectedColumns;
   private final String filter;
-  private final LanceScanOptions scanOptions;
+  private final LanceContinuousOptions continuousOptions;
   private final Long limit;
 
-  public LanceSource(LanceOptions options, RowType rowType) {
-    this(options, rowType, null, null, LanceScanOptions.latest(), null);
-  }
-
-  public LanceSource(
-      LanceOptions options,
-      RowType rowType,
-      @Nullable List<String> selectedColumns,
-      @Nullable String filter) {
-    this(options, rowType, selectedColumns, filter, LanceScanOptions.latest(), null);
-  }
-
-  public LanceSource(
+  public ContinuousLanceSource(
       LanceOptions options,
       RowType rowType,
       @Nullable List<String> selectedColumns,
       @Nullable String filter,
-      LanceScanOptions scanOptions,
+      LanceContinuousOptions continuousOptions,
       @Nullable Long limit) {
     this.options = Objects.requireNonNull(options, "options");
     this.rowType = Objects.requireNonNull(rowType, "rowType");
     this.selectedColumns = selectedColumns == null ? null : selectedColumns.toArray(new String[0]);
     this.filter = filter == null || filter.isBlank() ? null : filter.trim();
-    this.scanOptions = scanOptions == null ? LanceScanOptions.latest() : scanOptions;
+    this.continuousOptions = Objects.requireNonNull(continuousOptions, "continuousOptions");
     this.limit = limit;
   }
 
   @Override
   public Boundedness getBoundedness() {
-    return Boundedness.BOUNDED;
+    return Boundedness.CONTINUOUS_UNBOUNDED;
   }
 
   @Override
@@ -84,16 +75,15 @@ public class LanceSource implements Source<RowData, LanceSourceSplit, LanceSourc
   }
 
   @Override
-  public SplitEnumerator<LanceSourceSplit, LanceSourceEnumState> createEnumerator(
+  public SplitEnumerator<LanceSourceSplit, LanceContinuousEnumState> createEnumerator(
       SplitEnumeratorContext<LanceSourceSplit> enumContext) {
-    return new LanceSourceEnumerator(enumContext, options, scanOptions);
+    return new ContinuousLanceSourceEnumerator(enumContext, options, continuousOptions);
   }
 
   @Override
-  public SplitEnumerator<LanceSourceSplit, LanceSourceEnumState> restoreEnumerator(
-      SplitEnumeratorContext<LanceSourceSplit> enumContext, LanceSourceEnumState checkpoint) {
-    return new LanceSourceEnumerator(
-        enumContext, options, scanOptions, checkpoint.remainingSplits());
+  public SplitEnumerator<LanceSourceSplit, LanceContinuousEnumState> restoreEnumerator(
+      SplitEnumeratorContext<LanceSourceSplit> enumContext, LanceContinuousEnumState checkpoint) {
+    return new ContinuousLanceSourceEnumerator(enumContext, options, continuousOptions, checkpoint);
   }
 
   @Override
@@ -102,23 +92,7 @@ public class LanceSource implements Source<RowData, LanceSourceSplit, LanceSourc
   }
 
   @Override
-  public SimpleVersionedSerializer<LanceSourceEnumState> getEnumeratorCheckpointSerializer() {
-    return LanceSourceEnumStateSerializer.INSTANCE;
-  }
-
-  RowType getRowType() {
-    return rowType;
-  }
-
-  LanceOptions getOptions() {
-    return options;
-  }
-
-  String[] getSelectedColumns() {
-    return selectedColumns == null ? null : Arrays.copyOf(selectedColumns, selectedColumns.length);
-  }
-
-  String getFilter() {
-    return filter;
+  public SimpleVersionedSerializer<LanceContinuousEnumState> getEnumeratorCheckpointSerializer() {
+    return LanceContinuousEnumStateSerializer.INSTANCE;
   }
 }

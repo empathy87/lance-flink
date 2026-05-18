@@ -13,6 +13,7 @@
  */
 package org.apache.flink.connector.lance.source;
 
+import org.apache.flink.connector.lance.LanceDatasetOpener;
 import org.apache.flink.connector.lance.config.LanceOptions;
 import org.apache.flink.connector.lance.converter.LanceTypeConverter;
 import org.apache.flink.connector.lance.converter.RowDataConverter;
@@ -22,6 +23,7 @@ import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.Transaction;
+import org.lance.operation.Append;
 import org.lance.operation.Overwrite;
 
 import org.apache.flink.connector.base.source.reader.RecordsWithSplitIds;
@@ -59,8 +61,6 @@ class LanceSourceSplitReaderTest {
   void limitBudgetIsSharedAcrossSplits() throws Exception {
     String datasetUri = tempDir.resolve("ds").toUri().toString();
 
-    // Three fragment writes of two rows each. Each Fragment.write() call produces its own fragment
-    // metadata; we commit them together so the dataset has at least three fragments.
     List<FragmentMetadata> allFragments = new ArrayList<>();
     for (int batch = 0; batch < 3; batch++) {
       int base = batch * 100;
@@ -82,13 +82,44 @@ class LanceSourceSplitReaderTest {
       Set<String> finished = new HashSet<>();
       drain(reader, emitted, finished);
 
-      // limit=2 must cap total emission across every split this reader handled. Without the
-      // per-reader budget, each fragment would have emitted up to its own limit and the reader
-      // would have produced 2 * splits.size() rows here.
+      // Per-reader budget caps total emission; without it each fragment would emit up to its
+      // own limit. Every assigned split must be reported finished, even ones we never scanned.
       assertThat(emitted).hasSize(2);
-      // Every split, including ones we never opened a scanner for, must be reported finished so
-      // the assigner can retire them.
       assertThat(finished).hasSize(splits.size());
+    } finally {
+      reader.close();
+    }
+  }
+
+  @Test
+  void readerReopensDatasetAcrossVersions() throws Exception {
+    String datasetUri = tempDir.resolve("ds-multi-version").toUri().toString();
+    commitOverwrite(
+        writeFragment(List.of(GenericRowData.of(1), GenericRowData.of(2)), datasetUri), datasetUri);
+    long v1 = openLatestVersion(datasetUri);
+    commitAppend(
+        writeFragment(List.of(GenericRowData.of(3), GenericRowData.of(4)), datasetUri), datasetUri);
+    long v2 = openLatestVersion(datasetUri);
+    assertThat(v2).isGreaterThan(v1);
+
+    // Continuous mode hands out splits at two different versions; the reader must close v1 and
+    // reopen at v2 mid-stream instead of failing.
+    int fragmentIdV1 = firstFragmentIdAt(datasetUri, v1);
+    int fragmentIdV2 = otherFragmentIdAt(datasetUri, v2, fragmentIdV1);
+    List<LanceSourceSplit> splits =
+        List.of(
+            LanceSourceSplit.fragment(v1, fragmentIdV1),
+            LanceSourceSplit.fragment(v2, fragmentIdV2));
+
+    LanceOptions opts = LanceOptions.builder().path(datasetUri).readBatchSize(16).build();
+    LanceSourceSplitReader reader = new LanceSourceSplitReader(opts, ROW_TYPE, null, null, null);
+    try {
+      reader.handleSplitsChanges(new SplitsAddition<>(splits));
+      List<RowData> emitted = new ArrayList<>();
+      Set<String> finished = new HashSet<>();
+      drain(reader, emitted, finished);
+      assertThat(emitted).hasSize(4);
+      assertThat(finished).hasSize(2);
     } finally {
       reader.close();
     }
@@ -150,7 +181,7 @@ class LanceSourceSplitReaderTest {
   private static List<LanceSourceSplit> listSplits(String datasetUri) {
     List<LanceSourceSplit> splits = new ArrayList<>();
     try (BufferAllocator alloc = new RootAllocator();
-        Dataset ds = Dataset.open().allocator(alloc).uri(datasetUri).build()) {
+        Dataset ds = LanceDatasetOpener.open(alloc, datasetUri)) {
       long version = ds.version();
       for (Fragment f : ds.getFragments()) {
         splits.add(LanceSourceSplit.fragment(version, f.getId()));
@@ -170,8 +201,39 @@ class LanceSourceSplitReaderTest {
   private static void commitOverwrite(List<FragmentMetadata> fragments, String datasetUri) {
     Overwrite operation = Overwrite.builder().fragments(fragments).schema(SCHEMA).build();
     try (BufferAllocator alloc = new RootAllocator();
-        Transaction tx = new Transaction.Builder().operation(operation).build()) {
-      new CommitBuilder(datasetUri, alloc).execute(tx);
+        Transaction tx = new Transaction.Builder().operation(operation).build();
+        Dataset ignored = new CommitBuilder(datasetUri, alloc).execute(tx)) {}
+  }
+
+  private static void commitAppend(List<FragmentMetadata> fragments, String datasetUri) {
+    Append operation = Append.builder().fragments(fragments).build();
+    try (BufferAllocator alloc = new RootAllocator();
+        Transaction tx = new Transaction.Builder().operation(operation).build();
+        Dataset ignored = new CommitBuilder(datasetUri, alloc).execute(tx)) {}
+  }
+
+  private static long openLatestVersion(String datasetUri) {
+    try (BufferAllocator alloc = new RootAllocator();
+        Dataset ds = LanceDatasetOpener.open(alloc, datasetUri)) {
+      return ds.version();
+    }
+  }
+
+  private static int firstFragmentIdAt(String datasetUri, long version) {
+    try (BufferAllocator alloc = new RootAllocator();
+        Dataset ds = LanceDatasetOpener.open(alloc, datasetUri, version)) {
+      return ds.getFragments().get(0).getId();
+    }
+  }
+
+  private static int otherFragmentIdAt(String datasetUri, long version, int excludeId) {
+    try (BufferAllocator alloc = new RootAllocator();
+        Dataset ds = LanceDatasetOpener.open(alloc, datasetUri, version)) {
+      for (Fragment f : ds.getFragments()) {
+        if (f.getId() != excludeId) return f.getId();
+      }
+      throw new IllegalStateException(
+          "Expected a fragment id distinct from " + excludeId + " at v" + version);
     }
   }
 }

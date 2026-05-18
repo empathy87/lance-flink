@@ -11,11 +11,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.flink.connector.lance;
+package org.apache.flink.connector.lance.source;
 
 import org.apache.flink.connector.lance.config.LanceOptions;
-import org.apache.flink.connector.lance.source.LanceSource;
-import org.apache.flink.connector.lance.source.LanceSourceSplit;
 
 import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.BigIntType;

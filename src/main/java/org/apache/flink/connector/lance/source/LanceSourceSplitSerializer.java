@@ -19,7 +19,7 @@ import org.apache.flink.core.memory.DataOutputSerializer;
 
 import java.io.IOException;
 
-/** /** Versioned binary serializer for {@link LanceSourceSplit}. */
+/** Versioned binary serializer for {@link LanceSourceSplit}. */
 public class LanceSourceSplitSerializer implements SimpleVersionedSerializer<LanceSourceSplit> {
 
   public static final LanceSourceSplitSerializer INSTANCE = new LanceSourceSplitSerializer();
@@ -45,12 +45,10 @@ public class LanceSourceSplitSerializer implements SimpleVersionedSerializer<Lan
     if (version != VERSION) {
       throw new IOException("Unknown LanceSourceSplit version: " + version);
     }
-
     DataInputDeserializer in = new DataInputDeserializer(bytes);
     long datasetVersion = in.readLong();
     int fragmentId = in.readInt();
     long recordsToSkip = in.readLong();
-
     return new LanceSourceSplit(datasetVersion, fragmentId, recordsToSkip);
   }
 }

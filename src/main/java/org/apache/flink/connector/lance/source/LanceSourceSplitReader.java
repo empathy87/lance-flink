@@ -13,13 +13,12 @@
  */
 package org.apache.flink.connector.lance.source;
 
+import org.apache.flink.connector.lance.LanceDatasetOpener;
 import org.apache.flink.connector.lance.config.LanceOptions;
-import org.apache.flink.connector.lance.converter.LanceTypeConverter;
 import org.apache.flink.connector.lance.converter.RowDataConverter;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
-import org.lance.ReadOptions;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 
@@ -34,7 +33,6 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowReader;
-import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -53,7 +51,7 @@ class LanceSourceSplitReader implements SplitReader<RowData, LanceSourceSplit> {
   private static final Logger LOG = LoggerFactory.getLogger(LanceSourceSplitReader.class);
 
   private final LanceOptions options;
-  private final RowType configuredRowType;
+  private final RowType rowType;
   private final String[] selectedColumns;
   private final String filter;
   private final Long limit;
@@ -68,7 +66,6 @@ class LanceSourceSplitReader implements SplitReader<RowData, LanceSourceSplit> {
   private ArrowReader currentReader;
   private long consumedFromSplit;
   private long openedDatasetVersion = -1L;
-  // Rows emitted by this reader; used to shrink per-fragment scan limits after limit pushdown.
   // TODO: Add tests for LIMIT pushdown with parallelism > 1 and restore.
   private long emitted;
 
@@ -79,7 +76,7 @@ class LanceSourceSplitReader implements SplitReader<RowData, LanceSourceSplit> {
       @Nullable String filter,
       @Nullable Long limit) {
     this.options = Objects.requireNonNull(options, "options");
-    this.configuredRowType = Objects.requireNonNull(rowType, "rowType");
+    this.rowType = Objects.requireNonNull(rowType, "rowType");
     this.selectedColumns =
         selectedColumns == null ? null : Arrays.copyOf(selectedColumns, selectedColumns.length);
     this.filter = filter == null || filter.isBlank() ? null : filter;
@@ -140,10 +137,6 @@ class LanceSourceSplitReader implements SplitReader<RowData, LanceSourceSplit> {
         }
       }
 
-      if (rows.isEmpty()) {
-        continue;
-      }
-
       consumedFromSplit += rows.size();
       emitted += rows.size();
       return LanceRecordsWithSplitIds.forRecords(currentSplit.splitId(), rows);
@@ -178,9 +171,7 @@ class LanceSourceSplitReader implements SplitReader<RowData, LanceSourceSplit> {
       LOG.warn("Failed to close Lance dataset", e);
     }
     try {
-      if (allocator != null) {
-        allocator.close();
-      }
+      allocator.close();
     } catch (Exception e) {
       LOG.warn("Failed to close memory allocator", e);
     }
@@ -188,31 +179,33 @@ class LanceSourceSplitReader implements SplitReader<RowData, LanceSourceSplit> {
 
   private void ensureDatasetOpen(long datasetVersion) throws IOException {
     if (dataset != null) {
-      if (openedDatasetVersion != datasetVersion) {
-        throw new IOException(
-            "Lance reader cannot mix dataset versions: opened "
-                + openedDatasetVersion
-                + ", requested "
-                + datasetVersion);
+      if (openedDatasetVersion == datasetVersion) {
+        return;
       }
-      return;
+      // Reopen pinned dataset when continuous splits move to another version.
+      try {
+        dataset.close();
+      } catch (Exception e) {
+        LOG.warn("Failed to close Lance dataset before reopening at v{}", datasetVersion, e);
+      }
+      dataset = null;
+      converter = null;
+      openedDatasetVersion = -1L;
     }
+
     String path = options.getPath();
     if (path == null || path.isBlank()) {
       throw new IOException("Lance dataset path cannot be empty");
     }
+
     try {
-      ReadOptions readOptions = new ReadOptions.Builder().setVersion(datasetVersion).build();
-      dataset = Dataset.open().readOptions(readOptions).allocator(allocator).uri(path).build();
+      dataset = LanceDatasetOpener.open(allocator, path, datasetVersion);
       openedDatasetVersion = datasetVersion;
     } catch (Exception e) {
-      throw new IOException("Cannot open Lance dataset: " + path, e);
+      throw new IOException(
+          "Cannot open Lance dataset at version " + datasetVersion + ": " + path, e);
     }
-    RowType rowType = configuredRowType;
-    if (rowType == null) {
-      Schema arrowSchema = dataset.getSchema();
-      rowType = LanceTypeConverter.toFlinkRowType(arrowSchema);
-    }
+
     converter = new RowDataConverter(rowType);
   }
 
@@ -234,7 +227,7 @@ class LanceSourceSplitReader implements SplitReader<RowData, LanceSourceSplit> {
     }
 
     Fragment fragment = findFragment(split.fragmentId());
-    // TODO: Ensure stable fragment scan order for recordsToSkip restore.
+    // TODO: Ensure stable row order within a fragment for recordsToSkip restore.
     try {
       currentScanner = fragment.newScan(builder.build());
       currentReader = currentScanner.scanBatches();
