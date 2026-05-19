@@ -263,6 +263,34 @@ class LanceFilterExpressionConverterTest {
     assertThat(convert(field("id", DataTypes.BIGINT(), 0))).isNull();
   }
 
+  @Test
+  void nanDoubleLiteralRejected() {
+    // NaN cannot be represented as a Lance filter literal — the scan-side formatter must refuse
+    // (same contract as the lookup path), so the filter falls back to Flink-side evaluation
+    // instead of being inlined as the broken text 'col = NaN'.
+    assertThat(convert(equals("score", DataTypes.DOUBLE(), Double.NaN))).isNull();
+  }
+
+  @Test
+  void positiveInfinityDoubleLiteralRejected() {
+    assertThat(convert(equals("score", DataTypes.DOUBLE(), Double.POSITIVE_INFINITY))).isNull();
+  }
+
+  @Test
+  void negativeInfinityDoubleLiteralRejected() {
+    assertThat(convert(equals("score", DataTypes.DOUBLE(), Double.NEGATIVE_INFINITY))).isNull();
+  }
+
+  @Test
+  void nanFloatLiteralRejected() {
+    assertThat(convert(equals("score", DataTypes.FLOAT(), Float.NaN))).isNull();
+  }
+
+  @Test
+  void infinityFloatLiteralRejected() {
+    assertThat(convert(equals("score", DataTypes.FLOAT(), Float.POSITIVE_INFINITY))).isNull();
+  }
+
   // ----- helpers -----
 
   private static String convert(ResolvedExpression expr) {

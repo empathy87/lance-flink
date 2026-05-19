@@ -14,7 +14,10 @@
 package org.apache.flink.connector.lance.table;
 
 import org.apache.flink.connector.lance.config.LanceOptions;
+import org.apache.flink.connector.lance.lookup.LanceLookupConfig;
+import org.apache.flink.connector.lance.source.scan.LanceScanOptions;
 
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.connector.source.abilities.SupportsFilterPushDown;
 import org.apache.flink.table.expressions.CallExpression;
@@ -83,7 +86,8 @@ public class LanceReadOptimizationsTest {
     @DisplayName("Test equals comparison push-down")
     void testEqualsFilterPushDown() {
       LanceDynamicTableSource source =
-          LanceDynamicTableSource.forBatch(baseOptions, physicalDataType);
+          LanceDynamicTableSource.forBatch(
+              baseOptions, LanceScanOptions.latest(), lookupDefaults(), physicalDataType);
 
       // Create status = 'active' expression
       List<ResolvedExpression> filters = createEqualsFilter("status", "active");
@@ -99,7 +103,8 @@ public class LanceReadOptimizationsTest {
     @DisplayName("Test numeric comparison push-down")
     void testNumericComparisonPushDown() {
       LanceDynamicTableSource source =
-          LanceDynamicTableSource.forBatch(baseOptions, physicalDataType);
+          LanceDynamicTableSource.forBatch(
+              baseOptions, LanceScanOptions.latest(), lookupDefaults(), physicalDataType);
 
       // Create score > 80 expression
       List<ResolvedExpression> filters =
@@ -114,7 +119,8 @@ public class LanceReadOptimizationsTest {
     @DisplayName("Test AND logic push-down")
     void testAndLogicPushDown() {
       LanceDynamicTableSource source =
-          LanceDynamicTableSource.forBatch(baseOptions, physicalDataType);
+          LanceDynamicTableSource.forBatch(
+              baseOptions, LanceScanOptions.latest(), lookupDefaults(), physicalDataType);
 
       // Create status = 'active' AND score > 60 expression
       ResolvedExpression statusFilter = createEqualsExpression("status", "active");
@@ -137,7 +143,8 @@ public class LanceReadOptimizationsTest {
     @DisplayName("Test IS NULL push-down")
     void testIsNullPushDown() {
       LanceDynamicTableSource source =
-          LanceDynamicTableSource.forBatch(baseOptions, physicalDataType);
+          LanceDynamicTableSource.forBatch(
+              baseOptions, LanceScanOptions.latest(), lookupDefaults(), physicalDataType);
 
       // Create name IS NULL expression
       FieldReferenceExpression fieldRef =
@@ -159,7 +166,8 @@ public class LanceReadOptimizationsTest {
     @DisplayName("Test IS NOT NULL push-down")
     void testIsNotNullPushDown() {
       LanceDynamicTableSource source =
-          LanceDynamicTableSource.forBatch(baseOptions, physicalDataType);
+          LanceDynamicTableSource.forBatch(
+              baseOptions, LanceScanOptions.latest(), lookupDefaults(), physicalDataType);
 
       // Create name IS NOT NULL expression
       FieldReferenceExpression fieldRef =
@@ -181,7 +189,8 @@ public class LanceReadOptimizationsTest {
     @DisplayName("Test multiple independent filter conditions")
     void testMultipleFilters() {
       LanceDynamicTableSource source =
-          LanceDynamicTableSource.forBatch(baseOptions, physicalDataType);
+          LanceDynamicTableSource.forBatch(
+              baseOptions, LanceScanOptions.latest(), lookupDefaults(), physicalDataType);
 
       // Create multiple independent filter conditions
       List<ResolvedExpression> filter1 = createEqualsFilter("status", "active");
@@ -203,7 +212,8 @@ public class LanceReadOptimizationsTest {
     @DisplayName("Test copy preserves filter conditions")
     void testCopyPreservesFilters() {
       LanceDynamicTableSource source =
-          LanceDynamicTableSource.forBatch(baseOptions, physicalDataType);
+          LanceDynamicTableSource.forBatch(
+              baseOptions, LanceScanOptions.latest(), lookupDefaults(), physicalDataType);
 
       // Apply filter conditions
       List<ResolvedExpression> filters = createEqualsFilter("status", "active");
@@ -226,7 +236,8 @@ public class LanceReadOptimizationsTest {
     @DisplayName("Test single column projection")
     void testSingleColumnProjection() {
       LanceDynamicTableSource source =
-          LanceDynamicTableSource.forBatch(baseOptions, physicalDataType);
+          LanceDynamicTableSource.forBatch(
+              baseOptions, LanceScanOptions.latest(), lookupDefaults(), physicalDataType);
 
       int[][] projection = {{0}}; // First column
       source.applyProjection(projection, projectedType(projection));
@@ -238,7 +249,8 @@ public class LanceReadOptimizationsTest {
     @DisplayName("Test multiple column projection")
     void testMultipleColumnProjection() {
       LanceDynamicTableSource source =
-          LanceDynamicTableSource.forBatch(baseOptions, physicalDataType);
+          LanceDynamicTableSource.forBatch(
+              baseOptions, LanceScanOptions.latest(), lookupDefaults(), physicalDataType);
 
       int[][] projection = {{0}, {1}, {3}};
       source.applyProjection(projection, projectedType(projection));
@@ -250,7 +262,8 @@ public class LanceReadOptimizationsTest {
     @DisplayName("Test nested projection not supported")
     void testNestedProjectionNotSupported() {
       LanceDynamicTableSource source =
-          LanceDynamicTableSource.forBatch(baseOptions, physicalDataType);
+          LanceDynamicTableSource.forBatch(
+              baseOptions, LanceScanOptions.latest(), lookupDefaults(), physicalDataType);
 
       assertFalse(source.supportsNestedProjection(), "Should not support nested projection");
     }
@@ -259,7 +272,8 @@ public class LanceReadOptimizationsTest {
     @DisplayName("Test copy preserves projection")
     void testCopyPreservesProjection() {
       LanceDynamicTableSource source =
-          LanceDynamicTableSource.forBatch(baseOptions, physicalDataType);
+          LanceDynamicTableSource.forBatch(
+              baseOptions, LanceScanOptions.latest(), lookupDefaults(), physicalDataType);
 
       int[][] projection = {{0}, {2}};
       source.applyProjection(projection, projectedType(projection));
@@ -280,7 +294,8 @@ public class LanceReadOptimizationsTest {
     @DisplayName("Test filter + projection combination")
     void testFilterWithProjection() {
       LanceDynamicTableSource source =
-          LanceDynamicTableSource.forBatch(baseOptions, physicalDataType);
+          LanceDynamicTableSource.forBatch(
+              baseOptions, LanceScanOptions.latest(), lookupDefaults(), physicalDataType);
 
       int[][] projection = {{0}, {1}, {3}}; // id, name, score
       source.applyProjection(projection, projectedType(projection));
@@ -356,5 +371,9 @@ public class LanceReadOptimizationsTest {
       fields[i] = DataTypes.FIELD(rowType.getFieldNames().get(idx), children.get(idx));
     }
     return DataTypes.ROW(fields);
+  }
+
+  private static LanceLookupConfig lookupDefaults() {
+    return LanceLookupConfig.fromConfig(new Configuration());
   }
 }

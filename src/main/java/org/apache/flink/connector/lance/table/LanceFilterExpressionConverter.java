@@ -13,6 +13,8 @@
  */
 package org.apache.flink.connector.lance.table;
 
+import org.apache.flink.connector.lance.LanceFilters;
+
 import org.apache.flink.table.expressions.CallExpression;
 import org.apache.flink.table.expressions.FieldReferenceExpression;
 import org.apache.flink.table.expressions.ResolvedExpression;
@@ -20,22 +22,21 @@ import org.apache.flink.table.expressions.ValueLiteralExpression;
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
 import org.apache.flink.table.functions.FunctionDefinition;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /** Converts Flink expressions to Lance filter strings, or null if unsupported. */
 final class LanceFilterExpressionConverter {
+  // TODO: Add OR pushdown once predicate parenthesizing and Lance filter support are fully covered.
+  // TODO: Add DATE/TIMESTAMP scan pushdown when literal formatting can use the field LogicalType.
 
   private LanceFilterExpressionConverter() {}
 
   static String toLanceFilter(ResolvedExpression expression) {
-    try {
-      if (expression instanceof CallExpression callExpr) {
-        return convertCall(callExpr);
-      }
-      return null;
-    } catch (Exception e) {
-      return null;
+    if (expression instanceof CallExpression callExpr) {
+      return convertCall(callExpr);
     }
+    return null;
   }
 
   private static String convertCall(CallExpression callExpr) {
@@ -74,7 +75,7 @@ final class LanceFilterExpressionConverter {
       return null;
     }
 
-    if (!isSafeIdentifier(fieldName) || value == null) {
+    if (!LanceFilters.isSafeIdentifier(fieldName) || value == null) {
       return null;
     }
     return fieldName + " " + operator + " " + value;
@@ -94,18 +95,15 @@ final class LanceFilterExpressionConverter {
     if (args.size() < 2) {
       return null;
     }
-    StringBuilder out = new StringBuilder();
-    for (int i = 0; i < args.size(); i++) {
-      String converted = toLanceFilter(args.get(i));
+    List<String> parts = new ArrayList<>(args.size());
+    for (ResolvedExpression arg : args) {
+      String converted = toLanceFilter(arg);
       if (converted == null) {
         return null;
       }
-      if (i > 0) {
-        out.append(" AND ");
-      }
-      out.append('(').append(converted).append(')');
+      parts.add("(" + converted + ")");
     }
-    return out.toString();
+    return LanceFilters.andAll(parts);
   }
 
   private static String buildNullCheck(List<ResolvedExpression> args, String operator) {
@@ -113,7 +111,7 @@ final class LanceFilterExpressionConverter {
       return null;
     }
     String fieldName = ((FieldReferenceExpression) args.get(0)).getName();
-    if (!isSafeIdentifier(fieldName)) {
+    if (!LanceFilters.isSafeIdentifier(fieldName)) {
       return null;
     }
     return fieldName + " " + operator;
@@ -123,23 +121,6 @@ final class LanceFilterExpressionConverter {
     if (!(expr instanceof ValueLiteralExpression literal)) {
       return null;
     }
-    Object value = literal.getValueAs(Object.class).orElse(null);
-    if (value == null) {
-      return null;
-    }
-    if (value instanceof String strValue) {
-      return "'" + strValue.replace("'", "''") + "'";
-    }
-    if (value instanceof Number) {
-      return value.toString();
-    }
-    if (value instanceof Boolean) {
-      return value.toString().toUpperCase();
-    }
-    return null;
-  }
-
-  private static boolean isSafeIdentifier(String name) {
-    return name != null && name.matches("[A-Za-z_][A-Za-z0-9_]*");
+    return LanceFilters.tryFormatLiteralFromValue(literal.getValueAs(Object.class).orElse(null));
   }
 }

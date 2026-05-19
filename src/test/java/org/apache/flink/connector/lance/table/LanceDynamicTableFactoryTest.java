@@ -325,6 +325,82 @@ class LanceDynamicTableFactoryTest {
         .hasMessageContaining("continuous.discovery-interval");
   }
 
+  // -- Lookup options --
+  @Test
+  void batchSourceCarriesParsedLookupConfig() {
+    Map<String, String> o = baseOptions();
+    o.put("lookup.allow-full-scan", "true");
+    o.put("lookup.cache", "PARTIAL");
+    o.put("lookup.partial-cache.max-rows", "100");
+    DynamicTableSource source = createSource(o);
+    LanceDynamicTableSource lance = (LanceDynamicTableSource) source;
+    assertThat(lance.getLookupConfig().allowFullScan()).isTrue();
+    assertThat(lance.getLookupConfig().cacheType().name()).isEqualTo("PARTIAL");
+    assertThat(lance.getLookupConfig().partialCacheConfig()).isPresent();
+  }
+
+  @Test
+  void continuousSourceAlsoAcceptsLookupOptions() {
+    // Continuous sources still accept lookup options (rejection happens at lookup-time, not
+    // catalog-time); a streaming-only table with a lookup option must still create successfully.
+    Map<String, String> o = baseOptions();
+    o.put("scan.mode", "continuous");
+    o.put("lookup.allow-full-scan", "true");
+    assertThat(createSource(o)).isInstanceOf(LanceDynamicTableSource.class);
+  }
+
+  @Test
+  void metadataTableAcceptsLookupOptionsAtCatalogTime() {
+    // The spec is explicit: a table valid for normal scan use must not become invalid merely
+    // because lookup-only options are unsupported for it. The rejection happens later, when the
+    // metadata table source is actually used as a lookup source.
+    Map<String, String> o = baseOptions();
+    o.put("metadata-type", "snapshots");
+    o.put("lookup.allow-full-scan", "true");
+    o.put("lookup.cache", "PARTIAL");
+    assertThat(createSource(o)).isInstanceOf(LanceMetadataTableSource.class);
+  }
+
+  @Test
+  void sinkRejectsLookupAllowFullScan() {
+    Map<String, String> o = baseOptions();
+    o.put("lookup.allow-full-scan", "true");
+    assertThatThrownBy(() -> createSink(o))
+        .isInstanceOf(ValidationException.class)
+        .hasMessageContaining("lookup.allow-full-scan")
+        .hasMessageContaining("only supported for reads");
+  }
+
+  @Test
+  void sinkRejectsLookupCache() {
+    Map<String, String> o = baseOptions();
+    o.put("lookup.cache", "PARTIAL");
+    assertThatThrownBy(() -> createSink(o))
+        .isInstanceOf(ValidationException.class)
+        .hasMessageContaining("lookup.cache")
+        .hasMessageContaining("only supported for reads");
+  }
+
+  @Test
+  void unknownLookupOptionStillRejected() {
+    Map<String, String> o = baseOptions();
+    o.put("lookup.unknown-option", "true");
+    assertThatThrownBy(() -> createSource(o))
+        .isInstanceOf(ValidationException.class)
+        .hasMessageContaining("lookup.unknown-option");
+  }
+
+  @Test
+  void maxRetriesIsNotAcceptedSilently() {
+    // lookup.max-retries is a standard FLIP-221 key, but the connector does not implement
+    // retrying lookups. The factory must surface this rather than appear to honor the option.
+    Map<String, String> o = baseOptions();
+    o.put("lookup.max-retries", "3");
+    assertThatThrownBy(() -> createSource(o))
+        .isInstanceOf(ValidationException.class)
+        .hasMessageContaining("lookup.max-retries");
+  }
+
   // -- Helpers --
   private static Map<String, String> baseOptions() {
     Map<String, String> options = new HashMap<>();

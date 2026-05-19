@@ -18,13 +18,16 @@ import org.apache.flink.connector.lance.config.LanceOptions.IndexType;
 import org.apache.flink.connector.lance.config.LanceOptions.MetricType;
 import org.apache.flink.connector.lance.converter.LanceTypeConverter;
 import org.apache.flink.connector.lance.converter.RowDataConverter;
+import org.apache.flink.connector.lance.lookup.LanceLookupConfig;
 import org.apache.flink.connector.lance.sink.LanceSinkV2;
 import org.apache.flink.connector.lance.source.LanceSourceSplit;
 import org.apache.flink.connector.lance.source.LanceSourceSplitSerializer;
+import org.apache.flink.connector.lance.source.scan.LanceScanOptions;
 import org.apache.flink.connector.lance.table.LanceDynamicTableFactory;
 import org.apache.flink.connector.lance.table.LanceDynamicTableSink;
 import org.apache.flink.connector.lance.table.LanceDynamicTableSource;
 
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.data.GenericArrayData;
 import org.apache.flink.table.data.GenericRowData;
@@ -210,7 +213,12 @@ class LanceConnectorITCase {
     LanceOptions options = LanceOptions.builder().path(datasetPath).build();
 
     // Create DynamicTableSource
-    LanceDynamicTableSource source = LanceDynamicTableSource.forBatch(options, dataType);
+    LanceDynamicTableSource source =
+        LanceDynamicTableSource.forBatch(
+            options,
+            LanceScanOptions.latest(),
+            LanceLookupConfig.fromConfig(new Configuration()),
+            dataType);
     assertThat(source.asSummaryString()).isEqualTo("Lance Table Source");
 
     // Create DynamicTableSink

@@ -13,16 +13,18 @@
  */
 package org.apache.flink.connector.lance.table;
 
+import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.InputFormatProvider;
+import org.apache.flink.table.connector.source.LookupTableSource;
 import org.apache.flink.table.connector.source.ScanTableSource;
 
 import java.util.HashMap;
 import java.util.Map;
 
 /** Read-only source for Lance metadata tables. */
-public class LanceMetadataTableSource implements ScanTableSource {
+public class LanceMetadataTableSource implements ScanTableSource, LookupTableSource {
 
   private final String path;
   private final MetadataTableType type;
@@ -43,6 +45,15 @@ public class LanceMetadataTableSource implements ScanTableSource {
   @Override
   public ScanRuntimeProvider getScanRuntimeProvider(ScanContext runtimeProviderContext) {
     return InputFormatProvider.of(new LanceMetadataInputFormat(path, type, sourceTableOptions));
+  }
+
+  @Override
+  public LookupRuntimeProvider getLookupRuntimeProvider(LookupContext context) {
+    throw new ValidationException(
+        "Lookup join is not supported on Lance metadata tables (metadata-type = "
+            + type.suffix()
+            + "). Metadata views are read-only snapshots of the catalog state and have no key"
+            + " index. Join against the base table instead.");
   }
 
   @Override

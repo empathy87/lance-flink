@@ -14,7 +14,10 @@
 package org.apache.flink.connector.lance.table;
 
 import org.apache.flink.connector.lance.config.LanceOptions;
+import org.apache.flink.connector.lance.lookup.LanceLookupConfig;
+import org.apache.flink.connector.lance.source.scan.LanceScanOptions;
 
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.types.DataType;
 
@@ -78,7 +81,15 @@ class LanceSqlITCase {
             "scan.startup-snapshot-id",
             "scan.startup-tag-name",
             "scan.startup-timestamp-millis",
-            "scan.startup-timestamp");
+            "scan.startup-timestamp",
+            "lookup.allow-full-scan",
+            "lookup.cache",
+            "lookup.partial-cache.max-rows",
+            "lookup.partial-cache.expire-after-write",
+            "lookup.partial-cache.expire-after-access",
+            "lookup.partial-cache.cache-missing-key");
+    // lookup.max-retries is intentionally not exposed because lookup retry is not implemented.
+    assertThat(optionalOptionKeys).doesNotContain("lookup.max-retries");
     assertThat(optionalOptionKeys)
         .doesNotContain(
             "read.columns",
@@ -102,7 +113,9 @@ class LanceSqlITCase {
             DataTypes.FIELD("content", DataTypes.STRING()),
             DataTypes.FIELD("embedding", DataTypes.ARRAY(DataTypes.FLOAT())));
 
-    LanceDynamicTableSource source = LanceDynamicTableSource.forBatch(options, dataType);
+    LanceDynamicTableSource source =
+        LanceDynamicTableSource.forBatch(
+            options, LanceScanOptions.latest(), lookupDefaults(), dataType);
 
     assertThat(source.getOptions()).isEqualTo(options);
     assertThat(source.getPhysicalDataType()).isEqualTo(dataType);
@@ -131,7 +144,9 @@ class LanceSqlITCase {
     LanceOptions options = LanceOptions.builder().path(datasetPath).build();
     DataType dataType = DataTypes.ROW(DataTypes.FIELD("id", DataTypes.BIGINT()));
 
-    LanceDynamicTableSource source = LanceDynamicTableSource.forBatch(options, dataType);
+    LanceDynamicTableSource source =
+        LanceDynamicTableSource.forBatch(
+            options, LanceScanOptions.latest(), lookupDefaults(), dataType);
     LanceDynamicTableSource copiedSource = (LanceDynamicTableSource) source.copy();
 
     assertThat(copiedSource).isNotSameAs(source);
@@ -196,5 +211,9 @@ class LanceSqlITCase {
   void testVectorSearchFunctionConfiguration() {
     LanceVectorSearchFunction function = new LanceVectorSearchFunction();
     assertThat(function).isNotNull();
+  }
+
+  private static LanceLookupConfig lookupDefaults() {
+    return LanceLookupConfig.fromConfig(new Configuration());
   }
 }

@@ -14,6 +14,8 @@
 package org.apache.flink.connector.lance.table;
 
 import org.apache.flink.connector.lance.config.LanceOptions;
+import org.apache.flink.connector.lance.lookup.LanceLookupConfig;
+import org.apache.flink.connector.lance.lookup.LanceLookupOptions;
 import org.apache.flink.connector.lance.source.LanceScanMode;
 import org.apache.flink.connector.lance.source.LanceSourceOptions;
 import org.apache.flink.connector.lance.source.continuous.LanceContinuousOptions;
@@ -97,6 +99,7 @@ public class LanceDynamicTableFactory
     options.add(LanceSourceOptions.SCAN_MODE);
     options.addAll(LanceScanOptions.ALL_OPTIONS);
     options.addAll(LanceContinuousOptions.ALL_OPTIONS);
+    options.addAll(LanceLookupOptions.ALL_OPTIONS);
     return Set.copyOf(options);
   }
 
@@ -113,6 +116,7 @@ public class LanceDynamicTableFactory
 
     LanceScanMode scanMode = parseScanMode(config);
     LanceOptions options = buildLanceOptions(config);
+    LanceLookupConfig lookupConfig = buildLookupConfig(config);
     ResolvedSchema schema = context.getCatalogTable().getResolvedSchema();
     DataType physicalDataType = schema.toPhysicalRowDataType();
 
@@ -124,7 +128,7 @@ public class LanceDynamicTableFactory
           "is only supported when scan.mode = continuous (current: scan.mode = batch (the"
               + " default)).");
       LanceScanOptions scanOptions = buildScanOptions(config);
-      return LanceDynamicTableSource.forBatch(options, scanOptions, physicalDataType);
+      return LanceDynamicTableSource.forBatch(options, scanOptions, lookupConfig, physicalDataType);
     }
 
     rejectIfPresent(
@@ -141,7 +145,16 @@ public class LanceDynamicTableFactory
               + " discovery cannot represent updates or deletes safely. Use scan.mode=batch for PK"
               + " reads.");
     }
-    return LanceDynamicTableSource.forContinuous(options, continuousOptions, physicalDataType);
+    return LanceDynamicTableSource.forContinuous(
+        options, continuousOptions, lookupConfig, physicalDataType);
+  }
+
+  private static LanceLookupConfig buildLookupConfig(ReadableConfig config) {
+    try {
+      return LanceLookupConfig.fromConfig(config);
+    } catch (IllegalArgumentException e) {
+      throw new ValidationException("Invalid Lance lookup options: " + e.getMessage(), e);
+    }
   }
 
   private static DynamicTableSource createMetadataTableSource(
@@ -232,6 +245,11 @@ public class LanceDynamicTableFactory
         config,
         LanceContinuousOptions.ALL_OPTIONS,
         "Lance continuous-source option",
+        "is only supported for reads.");
+    rejectIfPresent(
+        config,
+        LanceLookupOptions.ALL_OPTIONS,
+        "Lance lookup option",
         "is only supported for reads.");
     LanceOptions options = buildLanceOptions(config);
     ResolvedSchema schema = context.getCatalogTable().getResolvedSchema();
