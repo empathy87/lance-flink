@@ -31,6 +31,7 @@ import org.lance.namespace.model.ListNamespacesResponse;
 import org.lance.namespace.model.ListTablesRequest;
 import org.lance.namespace.model.ListTablesResponse;
 import org.lance.namespace.model.NamespaceExistsRequest;
+import org.lance.namespace.model.RenameTableRequest;
 import org.lance.namespace.model.TableExistsRequest;
 
 import org.apache.flink.table.api.Schema;
@@ -44,6 +45,7 @@ import org.apache.flink.table.catalog.CatalogPartitionSpec;
 import org.apache.flink.table.catalog.CatalogTable;
 import org.apache.flink.table.catalog.ObjectPath;
 import org.apache.flink.table.catalog.ResolvedCatalogBaseTable;
+import org.apache.flink.table.catalog.TableChange;
 import org.apache.flink.table.catalog.exceptions.CatalogException;
 import org.apache.flink.table.catalog.exceptions.DatabaseAlreadyExistException;
 import org.apache.flink.table.catalog.exceptions.DatabaseNotEmptyException;
@@ -754,7 +756,35 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
       return;
     }
 
-    throw new CatalogException("Lance namespace catalog does not support renaming tables");
+    try {
+      namespace.renameTable(
+          new RenameTableRequest().id(tableId(tablePath)).newTableName(newTableName));
+    } catch (RuntimeException e) {
+      if (isNamespaceUnsupported(e)) {
+        throw new CatalogException(
+            "Table rename is not supported by this Lance namespace implementation ("
+                + namespace.getClass().getSimpleName()
+                + "). Configure a Lance namespace that supports table rename.",
+            e);
+      }
+      if (isNamespaceNotFound(e)) {
+        if (!ignoreIfNotExists) {
+          throw new TableNotExistException(getName(), tablePath);
+        }
+        return;
+      }
+      if (isNamespaceAlreadyExists(e)) {
+        throw new CatalogException(
+            "Cannot rename Lance table '"
+                + tablePath
+                + "' to '"
+                + newTableName
+                + "': a table with the target name already exists.",
+            e);
+      }
+      throw new CatalogException(
+          "Failed to rename Lance table '" + tablePath + "' to '" + newTableName + "'", e);
+    }
   }
 
   @Override
@@ -768,7 +798,71 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
       return;
     }
 
-    throw new CatalogException("Lance namespace catalog does not support altering tables");
+    throw new CatalogException(
+        "ALTER TABLE without explicit table changes is not supported by the Lance namespace"
+            + " catalog. Use the SQL DDL path so Flink can provide the TableChange list.");
+  }
+
+  @Override
+  public void alterTable(
+      ObjectPath tablePath,
+      CatalogBaseTable newTable,
+      List<TableChange> tableChanges,
+      boolean ignoreIfNotExists)
+      throws TableNotExistException, CatalogException {
+    rejectMetadataMutation(tablePath, "alter");
+    if (!tableExists(tablePath)) {
+      if (!ignoreIfNotExists) {
+        throw new TableNotExistException(getName(), tablePath);
+      }
+      return;
+    }
+    if (tableChanges == null || tableChanges.isEmpty()) {
+      return;
+    }
+
+    String datasetPath = resolveDatasetPath(tablePath);
+    try (Dataset dataset = LanceDatasetOpener.open(allocator, datasetPath)) {
+      org.apache.arrow.vector.types.pojo.Schema currentArrow = dataset.getSchema();
+      RowType currentRowType = LanceTypeConverter.toFlinkRowType(currentArrow);
+      List<String> currentPrimaryKeys =
+          readPrimaryKeysFromMetadata(currentArrow.getCustomMetadata());
+
+      LanceTableAlterPlanner.AlterPlan plan =
+          LanceTableAlterPlanner.plan(currentRowType, currentPrimaryKeys, tableChanges);
+
+      if (plan.isEmpty()) {
+        return;
+      }
+
+      applyAlterPlan(dataset, plan);
+    } catch (CatalogException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new CatalogException(
+          "Failed to apply ALTER TABLE to Lance dataset: " + tablePath + " at " + datasetPath, e);
+    }
+  }
+
+  private static void applyAlterPlan(Dataset dataset, LanceTableAlterPlanner.AlterPlan plan) {
+    // TODO: Allow mixed-kind ALTER once Lance exposes atomic multi-op schema commits.
+    // TODO: Re-plan and retry ALTER once Lance exposes typed schema-conflict errors.
+    if (!plan.columnsToAdd().isEmpty()) {
+      dataset.addColumns(new org.apache.arrow.vector.types.pojo.Schema(plan.columnsToAdd()));
+    }
+    if (!plan.columnsToDrop().isEmpty()) {
+      dataset.dropColumns(plan.columnsToDrop());
+    }
+    if (!plan.columnsToRename().isEmpty()) {
+      dataset.alterColumns(plan.columnsToRename());
+    }
+  }
+
+  private static boolean isNamespaceUnsupported(RuntimeException e) {
+    if (e instanceof org.lance.namespace.errors.UnsupportedOperationException) {
+      return true;
+    }
+    return messageContains(e, "not supported");
   }
 
   // Partition / Function / Statistics (unsupported)

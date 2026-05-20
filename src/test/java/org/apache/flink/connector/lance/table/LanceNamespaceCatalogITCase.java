@@ -370,6 +370,217 @@ class LanceNamespaceCatalogITCase {
     }
   }
 
+  @Test
+  void testAlterTableAddColumnWithNullBackfill() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql("CREATE TABLE customers (id INT, name STRING)");
+    tableEnv.executeSql("INSERT INTO customers VALUES (1, 'alice'), (2, 'bob')").await();
+
+    tableEnv.executeSql("ALTER TABLE customers ADD email STRING");
+
+    Catalog catalog = tableEnv.getCatalog("my_catalog").orElseThrow();
+    CatalogBaseTable described = catalog.getTable(new ObjectPath("default", "customers"));
+    assertThat(described.getUnresolvedSchema().getColumns())
+        .extracting(col -> col.getName())
+        .containsExactly("id", "name", "email");
+
+    List<Row> rowsAfterAdd = collectRows(tableEnv.executeSql("SELECT id, email FROM customers"));
+    assertThat(rowsAfterAdd).containsExactlyInAnyOrder(Row.of(1, null), Row.of(2, null));
+
+    tableEnv
+        .executeSql(
+            "INSERT INTO customers VALUES (3, 'carol', 'carol@example.com'),"
+                + " (4, 'dave', 'dave@example.com')")
+        .await();
+
+    List<Row> mixedRows =
+        collectRows(tableEnv.executeSql("SELECT id, email FROM customers ORDER BY id"));
+    assertThat(mixedRows)
+        .containsExactly(
+            Row.of(1, null),
+            Row.of(2, null),
+            Row.of(3, "carol@example.com"),
+            Row.of(4, "dave@example.com"));
+  }
+
+  @Test
+  void testAlterTableAddMultipleColumnsInOneStatement() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql("CREATE TABLE multi_add (id INT)");
+    tableEnv.executeSql("INSERT INTO multi_add VALUES (1), (2)").await();
+
+    tableEnv.executeSql("ALTER TABLE multi_add ADD (email STRING, phone STRING)");
+
+    Catalog catalog = tableEnv.getCatalog("my_catalog").orElseThrow();
+    CatalogBaseTable described = catalog.getTable(new ObjectPath("default", "multi_add"));
+    assertThat(described.getUnresolvedSchema().getColumns())
+        .extracting(col -> col.getName())
+        .containsExactly("id", "email", "phone");
+
+    List<Row> rows =
+        collectRows(tableEnv.executeSql("SELECT id, email, phone FROM multi_add ORDER BY id"));
+    assertThat(rows).containsExactly(Row.of(1, null, null), Row.of(2, null, null));
+  }
+
+  @Test
+  void testAlterTableRenameColumn() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql("CREATE TABLE renamed (id INT, label STRING)");
+    tableEnv.executeSql("INSERT INTO renamed VALUES (1, 'a'), (2, 'b')").await();
+
+    tableEnv.executeSql("ALTER TABLE renamed RENAME label TO display_name");
+
+    Catalog catalog = tableEnv.getCatalog("my_catalog").orElseThrow();
+    CatalogBaseTable described = catalog.getTable(new ObjectPath("default", "renamed"));
+    assertThat(described.getUnresolvedSchema().getColumns())
+        .extracting(col -> col.getName())
+        .containsExactly("id", "display_name");
+
+    List<Row> rows =
+        collectRows(tableEnv.executeSql("SELECT id, display_name FROM renamed ORDER BY id"));
+    assertThat(rows).containsExactly(Row.of(1, "a"), Row.of(2, "b"));
+  }
+
+  @Test
+  void testAlterTableDropColumn() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql("CREATE TABLE dropped (id INT, label STRING, extra BIGINT)");
+    tableEnv.executeSql("INSERT INTO dropped VALUES (1, 'a', CAST(10 AS BIGINT))").await();
+
+    tableEnv.executeSql("ALTER TABLE dropped DROP extra");
+
+    Catalog catalog = tableEnv.getCatalog("my_catalog").orElseThrow();
+    CatalogBaseTable described = catalog.getTable(new ObjectPath("default", "dropped"));
+    assertThat(described.getUnresolvedSchema().getColumns())
+        .extracting(col -> col.getName())
+        .containsExactly("id", "label");
+
+    List<Row> rows = collectRows(tableEnv.executeSql("SELECT * FROM dropped"));
+    assertThat(rows).containsExactly(Row.of(1, "a"));
+  }
+
+  @Test
+  void testAlterTableModifyTypeRejected() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql("CREATE TABLE modify_type (id INT, label STRING)");
+
+    assertThatThrownBy(() -> tableEnv.executeSql("ALTER TABLE modify_type MODIFY id BIGINT"))
+        .hasStackTraceContaining("ALTER MODIFY column 'id'")
+        .hasStackTraceContaining("lance-core does not yet apply");
+  }
+
+  @Test
+  void testAlterTableAddNotNullRejected() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql("CREATE TABLE reject_notnull (id INT)");
+
+    assertThatThrownBy(
+            () -> tableEnv.executeSql("ALTER TABLE reject_notnull ADD email STRING NOT NULL"))
+        .hasStackTraceContaining("ALTER ADD column 'email'")
+        .hasStackTraceContaining("nullable");
+  }
+
+  @Test
+  void testAlterTableAddWithFirstPositionRejected() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql("CREATE TABLE reject_pos (id INT, name STRING)");
+
+    assertThatThrownBy(
+            () -> tableEnv.executeSql("ALTER TABLE reject_pos ADD created_at TIMESTAMP(3) FIRST"))
+        .hasStackTraceContaining("Column positions (FIRST / AFTER) are not supported");
+  }
+
+  @Test
+  void testAlterTableDropPrimaryKeyRejected() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql(
+        "CREATE TABLE pk_drop (id INT, name STRING, PRIMARY KEY (id) NOT ENFORCED)");
+
+    // Flink itself rejects the DDL before our catalog sees it; either Flink's
+    // "used as the primary key" message or our planner's wording is acceptable.
+    assertThatThrownBy(() -> tableEnv.executeSql("ALTER TABLE pk_drop DROP id"))
+        .hasStackTraceContaining("primary key");
+  }
+
+  @Test
+  void testAlterTableRenamePrimaryKeyRejected() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql(
+        "CREATE TABLE pk_rename (id INT, name STRING, PRIMARY KEY (id) NOT ENFORCED)");
+
+    assertThatThrownBy(() -> tableEnv.executeSql("ALTER TABLE pk_rename RENAME id TO new_id"))
+        .hasStackTraceContaining("Primary key columns cannot be renamed");
+  }
+
+  @Test
+  void testAlterTableModifyPrimaryKeyTypeRejected() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql(
+        "CREATE TABLE pk_modify (id INT, name STRING, PRIMARY KEY (id) NOT ENFORCED)");
+
+    // MODIFY is rejected before PK-specific type validation in this PR.
+    assertThatThrownBy(() -> tableEnv.executeSql("ALTER TABLE pk_modify MODIFY id BIGINT"))
+        .hasStackTraceContaining("ALTER MODIFY column 'id'");
+  }
+
+  @Test
+  void testAlterTableSetRejected() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql("CREATE TABLE set_options (id INT)");
+
+    assertThatThrownBy(
+            () -> tableEnv.executeSql("ALTER TABLE set_options SET ('owner.team' = 'data')"))
+        .hasStackTraceContaining("ALTER TABLE SET")
+        .hasStackTraceContaining("not supported yet");
+  }
+
+  @Test
+  void testAlterTableResetRejected() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql("CREATE TABLE reset_options (id INT)");
+
+    assertThatThrownBy(() -> tableEnv.executeSql("ALTER TABLE reset_options RESET ('owner.team')"))
+        .hasStackTraceContaining("ALTER TABLE RESET")
+        .hasStackTraceContaining("not supported yet");
+  }
+
+  @Test
+  void testAlterTableMetadataTableRejected() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql("CREATE TABLE meta_alter (id INT)");
+    tableEnv.executeSql("INSERT INTO meta_alter VALUES (1)").await();
+
+    assertThatThrownBy(
+            () -> tableEnv.executeSql("ALTER TABLE `meta_alter$snapshots` ADD foo STRING"))
+        .hasStackTraceContaining("Cannot alter Lance metadata table");
+  }
+
+  @Test
+  void testAlterTableRenameToWithDirectoryNamespaceRejected() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql("CREATE TABLE to_rename (id INT)");
+
+    assertThatThrownBy(() -> tableEnv.executeSql("ALTER TABLE to_rename RENAME TO renamed_target"))
+        .hasStackTraceContaining(
+            "Table rename is not supported by this Lance namespace implementation");
+  }
+
+  @Test
+  void testAlterTableSchemaPersistsAcrossReopen() throws Exception {
+    TableEnvironment tableEnv = newCatalog("my_catalog");
+    tableEnv.executeSql("CREATE TABLE persisted (id INT, name STRING)");
+    tableEnv.executeSql("INSERT INTO persisted VALUES (1, 'a')").await();
+    tableEnv.executeSql("ALTER TABLE persisted ADD email STRING");
+
+    // Re-create the catalog against the same warehouse and verify the new column survives.
+    TableEnvironment reopened = newCatalog("reopened_catalog");
+    Catalog catalog = reopened.getCatalog("reopened_catalog").orElseThrow();
+    CatalogBaseTable described = catalog.getTable(new ObjectPath("default", "persisted"));
+    assertThat(described.getUnresolvedSchema().getColumns())
+        .extracting(col -> col.getName())
+        .containsExactly("id", "name", "email");
+  }
+
   private static long latestVersionOf(TableEnvironment tableEnv, String tableName)
       throws Exception {
     Catalog catalog = tableEnv.getCatalog("my_catalog").orElseThrow();
