@@ -360,6 +360,45 @@ class LanceLookupJoinSqlITCase {
   }
 
   @Test
+  void lookupJoinWorksWithProcedureCreatedIndex() throws Exception {
+    // §6 step 12: end-to-end happy-path exercising sys.create_index alongside the existing
+    // direct-SDK setup (which other tests in this class still use). A regression in
+    // CreateIndexProcedure must not mask a regression in LanceLookupFunction.
+    String warehouse = tempDir.resolve("warehouse-procedure-index").toUri().toString();
+
+    TableEnvironment batch = batchEnv();
+    batch.executeSql(
+        "CREATE CATALOG my_catalog WITH ('type' = 'lance', 'warehouse' = '" + warehouse + "')");
+    batch.executeSql("USE CATALOG my_catalog");
+    batch.executeSql("CREATE TABLE customers (id BIGINT, name STRING)");
+    batch.executeSql("INSERT INTO customers VALUES (1, 'Alice'), (2, 'Bob')").await();
+
+    batch
+        .executeSql(
+            "CALL sys.create_index("
+                + "`table` => 'default.customers', "
+                + "`column` => 'id', "
+                + "index_type => 'BTREE')")
+        .await();
+
+    StreamTableEnvironment env = streamingEnv();
+    env.executeSql(
+        "CREATE CATALOG my_catalog WITH ('type' = 'lance', 'warehouse' = '" + warehouse + "')");
+    env.executeSql("USE CATALOG my_catalog");
+    env.executeSql(
+        "CREATE TEMPORARY VIEW events AS SELECT *, PROCTIME() AS proc_time"
+            + " FROM (VALUES (10, 1), (11, 2)) AS t(event_id, customer_id)");
+
+    List<Row> rows =
+        collect(
+            env,
+            "SELECT e.event_id, c.name FROM events AS e"
+                + " JOIN customers FOR SYSTEM_TIME AS OF e.proc_time AS c"
+                + " ON e.customer_id = c.id");
+    assertThat(rowsByEvent(rows)).containsOnly(Map.entry(10, "Alice"), Map.entry(11, "Bob"));
+  }
+
+  @Test
   void metadataTableRejectsLookup() throws Exception {
     String customersPath = newDatasetPath("customers-metadata");
     seedCustomersWithIndex(customersPath, List.of(row(1L, "Alice")));

@@ -17,6 +17,7 @@ import org.apache.flink.connector.lance.LanceDatasetOpener;
 import org.apache.flink.connector.lance.converter.LanceTypeConverter;
 import org.apache.flink.connector.lance.source.scan.LanceScanOptions;
 import org.apache.flink.connector.lance.source.scan.LanceScanVersionResolver;
+import org.apache.flink.connector.lance.table.procedures.LanceProcedureRegistry;
 
 import org.lance.Dataset;
 import org.lance.namespace.LanceNamespace;
@@ -35,6 +36,7 @@ import org.lance.namespace.model.RenameTableRequest;
 import org.lance.namespace.model.TableExistsRequest;
 
 import org.apache.flink.table.api.Schema;
+import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.AbstractCatalog;
 import org.apache.flink.table.catalog.CatalogBaseTable;
 import org.apache.flink.table.catalog.CatalogDatabase;
@@ -52,11 +54,13 @@ import org.apache.flink.table.catalog.exceptions.DatabaseNotEmptyException;
 import org.apache.flink.table.catalog.exceptions.DatabaseNotExistException;
 import org.apache.flink.table.catalog.exceptions.FunctionNotExistException;
 import org.apache.flink.table.catalog.exceptions.PartitionNotExistException;
+import org.apache.flink.table.catalog.exceptions.ProcedureNotExistException;
 import org.apache.flink.table.catalog.exceptions.TableAlreadyExistException;
 import org.apache.flink.table.catalog.exceptions.TableNotExistException;
 import org.apache.flink.table.catalog.stats.CatalogColumnStatistics;
 import org.apache.flink.table.catalog.stats.CatalogTableStatistics;
 import org.apache.flink.table.expressions.Expression;
+import org.apache.flink.table.procedures.Procedure;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -84,6 +88,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static java.util.Collections.singletonList;
@@ -114,6 +119,11 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
     this.options = new HashMap<>(Objects.requireNonNull(options, "options"));
     this.allocator = new RootAllocator();
     LOG.info("Creating LanceNamespaceCatalog: namespaceClass={}", namespace.getClass().getName());
+  }
+
+  /** Opens a Lance dataset at HEAD; caller owns and must close the returned {@link Dataset}. */
+  public Dataset openTable(String tableIdentifier) {
+    return LanceDatasetOpener.open(allocator, resolveDatasetPath(tableIdentifier));
   }
 
   @Override
@@ -669,6 +679,14 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
     return new RowType(rowType.isNullable(), fields);
   }
 
+  private String resolveDatasetPath(String tableIdentifier) {
+    try {
+      return resolveDatasetPath(parseTableIdentifier(tableIdentifier));
+    } catch (TableNotExistException e) {
+      throw new ValidationException("Table not found: " + tableIdentifier, e);
+    }
+  }
+
   private record TableSchemaSpec(RowType rowType, List<String> primaryKeys) {}
 
   private static org.apache.arrow.vector.types.pojo.Schema attachPrimaryKeyMetadata(
@@ -863,6 +881,34 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
       return true;
     }
     return messageContains(e, "not supported");
+  }
+
+  // Procedures (CALL sys.<name>(...))
+
+  @Override
+  public List<String> listProcedures(String dbName)
+      throws DatabaseNotExistException, CatalogException {
+    if ("sys".equalsIgnoreCase(dbName)) {
+      return LanceProcedureRegistry.listNames();
+    }
+    if (!databaseExists(dbName)) {
+      throw new DatabaseNotExistException(getName(), dbName);
+    }
+    return Collections.emptyList();
+  }
+
+  @Override
+  public Procedure getProcedure(ObjectPath procedurePath)
+      throws ProcedureNotExistException, CatalogException {
+    if (!"sys".equalsIgnoreCase(procedurePath.getDatabaseName())) {
+      throw new ProcedureNotExistException(getName(), procedurePath);
+    }
+    Function<LanceNamespaceCatalog, Procedure> factory =
+        LanceProcedureRegistry.lookup(procedurePath.getObjectName());
+    if (factory == null) {
+      throw new ProcedureNotExistException(getName(), procedurePath);
+    }
+    return factory.apply(this);
   }
 
   // Partition / Function / Statistics (unsupported)
@@ -1081,5 +1127,38 @@ public class LanceNamespaceCatalog extends AbstractCatalog {
       writer.end();
       return out.toByteArray();
     }
+  }
+
+  /** Parses a textual table identifier in {@code db.tbl} or {@code cat.db.tbl} form. */
+  private ObjectPath parseTableIdentifier(String tableIdentifier) {
+    if (tableIdentifier == null || tableIdentifier.isBlank()) {
+      throw new ValidationException("`table` must not be null or empty");
+    }
+    String trimmed = tableIdentifier.trim();
+    String[] parts = trimmed.split("\\.", -1);
+    for (String part : parts) {
+      if (part.isEmpty()) {
+        throw new ValidationException(
+            "Invalid table identifier '" + tableIdentifier + "': empty path part");
+      }
+    }
+    if (parts.length == 2) {
+      return new ObjectPath(parts[0], parts[1]);
+    }
+    if (parts.length == 3) {
+      if (!parts[0].equals(getName())) {
+        throw new ValidationException(
+            "Cannot resolve table '"
+                + tableIdentifier
+                + "' through catalog '"
+                + getName()
+                + "'. Use USE CATALOG "
+                + getName()
+                + " first, or pass a table identifier owned by this catalog.");
+      }
+      return new ObjectPath(parts[1], parts[2]);
+    }
+    throw new ValidationException(
+        "Invalid table identifier '" + tableIdentifier + "': expected 'db.tbl' or 'cat.db.tbl'");
   }
 }
